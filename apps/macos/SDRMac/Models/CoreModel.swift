@@ -1204,6 +1204,17 @@ final class CoreModel {
             if vfoOffsetHz != hz {
                 vfoOffsetHz = hz
             }
+        case .bandwidthChanged(let hz):
+            // Symmetric with `vfoOffsetChanged` above —
+            // engine-authoritative bandwidth, fires for host
+            // commands AND engine-internal changes (scanner
+            // retune to a channel with a different bandwidth,
+            // future per-mode auto-pick). Same same-value
+            // guard rationale. Per `CodeRabbit` round 1 on
+            // PR #616.
+            if bandwidthHz != hz {
+                bandwidthHz = hz
+            }
         @unknown default:
             // Surface new engine event variants during
             // development. SdrCoreEvent is a non-frozen enum
@@ -1471,10 +1482,15 @@ final class CoreModel {
         // issue #489 (Mac parity audit confirmed the bug
         // exists on this side too).
         //
-        // Skip the engine round-trip when offset is already 0 —
-        // most tunes start from a centered VFO and the no-op
-        // setVfoOffset would just bounce the local field.
-        if vfoOffsetHz != 0 {
+        // Skip the engine round-trip when offset is already
+        // (within float-noise tolerance of) zero — most tunes
+        // start from a centered VFO and the no-op setVfoOffset
+        // would just bounce the local field. Tolerant compare
+        // because the offset is a `Double` round-tripping
+        // through the FFI; the engine echo can land at e.g.
+        // 1e-12 instead of exactly 0. Per `CodeRabbit` round 1
+        // on PR #616.
+        if abs(vfoOffsetHz) >= Self.vfoOffsetEpsilonHz {
             setVfoOffset(0)
         }
     }
@@ -1489,22 +1505,41 @@ final class CoreModel {
         capture { try core?.setVfoOffset(hz) }
     }
 
+    /// Tolerance for "is this at default?" comparisons on
+    /// `vfoOffsetHz` and `bandwidthHz`. Both are `Double`
+    /// values that round-trip through the FFI (and the engine
+    /// echo can land at, e.g., 1e-12 instead of exactly 0
+    /// after DSP-side resampling). Half a Hz is well below
+    /// any meaningful audible / spectral effect, so a
+    /// half-Hz tolerance lets every "at default" path agree
+    /// without misclassifying epsilon noise as a non-default
+    /// state — which would keep the floating Reset-VFO button
+    /// visible even though the user can't tell anything's off.
+    /// Per `CodeRabbit` round 1 on PR #616.
+    static let vfoOffsetEpsilonHz: Double = 0.5
+    /// Same tolerance for bandwidth-vs-default comparisons.
+    /// Aliased to the same value so the threshold stays
+    /// consistent across the affordance code paths.
+    static let bandwidthEpsilonHz: Double = 0.5
+
     /// `true` when the current bandwidth differs from the
-    /// active demod mode's default (within a 0.5 Hz tolerance
-    /// to defeat float round-trip noise from the engine echo).
-    /// Drives the bandwidth-row reset icon's enable state on
-    /// the Radio panel. Per #488.
+    /// active demod mode's default (within
+    /// `bandwidthEpsilonHz` tolerance to defeat float round-
+    /// trip noise from the engine echo). Drives the bandwidth-
+    /// row reset icon's enable state on the Radio panel.
+    /// Per #488.
     var isBandwidthAtModeDefault: Bool {
-        abs(bandwidthHz - demodMode.defaultBandwidthHz) < 0.5
+        abs(bandwidthHz - demodMode.defaultBandwidthHz) < Self.bandwidthEpsilonHz
     }
 
     /// `true` when the VFO is at its default state — bandwidth
-    /// matches the mode default AND offset is zero. Drives the
-    /// floating Reset VFO button's visibility on the spectrum
-    /// overlay (button hides at default, appears when the user
-    /// has moved either knob). Per #488.
+    /// matches the mode default AND offset is (within tolerance
+    /// of) zero. Drives the floating Reset VFO button's
+    /// visibility on the spectrum overlay (button hides at
+    /// default, appears when the user has moved either knob).
+    /// Per #488.
     var isVfoAtDefault: Bool {
-        isBandwidthAtModeDefault && vfoOffsetHz == 0
+        isBandwidthAtModeDefault && abs(vfoOffsetHz) < Self.vfoOffsetEpsilonHz
     }
 
     /// One-click reset for both bandwidth AND offset. Routes
@@ -1516,10 +1551,10 @@ final class CoreModel {
     /// drift. Per #488.
     func resetVfo() {
         let defaultBw = demodMode.defaultBandwidthHz
-        if abs(bandwidthHz - defaultBw) >= 0.5 {
+        if abs(bandwidthHz - defaultBw) >= Self.bandwidthEpsilonHz {
             setBandwidth(defaultBw)
         }
-        if vfoOffsetHz != 0 {
+        if abs(vfoOffsetHz) >= Self.vfoOffsetEpsilonHz {
             setVfoOffset(0)
         }
     }
@@ -1530,7 +1565,7 @@ final class CoreModel {
     /// the channel filter width can do exactly that. Per #488.
     func resetBandwidthToModeDefault() {
         let defaultBw = demodMode.defaultBandwidthHz
-        if abs(bandwidthHz - defaultBw) >= 0.5 {
+        if abs(bandwidthHz - defaultBw) >= Self.bandwidthEpsilonHz {
             setBandwidth(defaultBw)
         }
     }
