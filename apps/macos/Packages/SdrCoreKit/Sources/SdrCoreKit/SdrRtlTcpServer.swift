@@ -59,8 +59,11 @@ public final class SdrRtlTcpServer: @unchecked Sendable {
         }
     }
 
-    /// Negotiated stream-codec mask (ABI 0.19, issue #400). Wire
-    /// bytes match `CodecMask::to_wire` on the Rust side.
+    /// Server-side **codec capability mask** (ABI 0.19, issue
+    /// #400). What the *server* is willing to negotiate. Wire
+    /// bytes match `CodecMask::to_wire` on the Rust side and
+    /// flow through `Config.compression`, the mDNS `codecs` TXT
+    /// field, and `DiscoveredServer.compression`.
     ///
     /// - `.noneOnly` (0x01) — vanilla rtl_tcp behaviour, every
     ///   client streams uncompressed IQ. The default; LZ4-aware
@@ -70,6 +73,12 @@ public final class SdrRtlTcpServer: @unchecked Sendable {
     ///   LZ4 compression with clients that ask. Clients that
     ///   don't speak the RTLX extension still get uncompressed
     ///   streams; the mask is a *capability*, not a requirement.
+    ///
+    /// **Distinct from `NegotiatedCodec`** — that's the per-
+    /// client *result* (whether THIS specific connection
+    /// landed on uncompressed or LZ4), with a different wire
+    /// encoding (0/1, not 0x01/0x03). Mixing the two was a real
+    /// bug in this PR's first round; CodeRabbit caught it.
     public enum Compression: UInt8, Sendable, CaseIterable, Codable {
         case noneOnly   = 0x01
         case noneAndLz4 = 0x03
@@ -78,6 +87,25 @@ public final class SdrRtlTcpServer: @unchecked Sendable {
             switch self {
             case .noneOnly:   return "None (legacy-compatible)"
             case .noneAndLz4: return "None + LZ4 (compression)"
+            }
+        }
+    }
+
+    /// Per-client **negotiated codec** — what THIS specific
+    /// connection actually settled on after handshake. Wire
+    /// bytes match the C `SdrRtlTcpClientInfo::codec` field
+    /// (header: 0 = None, 1 = LZ4). Distinct from
+    /// `Compression`, the server capability mask, which uses
+    /// 0x01/0x03 wire bytes — using one for the other reads
+    /// silently wrong (LZ4 clients showing as uncompressed).
+    public enum NegotiatedCodec: UInt8, Sendable, CaseIterable, Codable {
+        case none = 0
+        case lz4  = 1
+
+        public var label: String {
+            switch self {
+            case .none: return "None"
+            case .lz4:  return "LZ4"
             }
         }
     }
@@ -246,9 +274,10 @@ public final class SdrRtlTcpServer: @unchecked Sendable {
         /// Seconds since this client's handshake completed.
         public var uptimeSecs: Double
         /// Negotiated stream codec for this session. Pre-#400
-        /// servers always report `.noneOnly` (the legacy wire
-        /// format).
-        public var codec: Compression
+        /// servers always report `.none` (the legacy wire
+        /// format). Distinct from `Compression` — see that
+        /// enum's docstring for the wire-encoding split.
+        public var codec: NegotiatedCodec
         /// Bytes written to this client's TCP socket since
         /// accept. Post-compression — LZ4 sessions report the
         /// compressed-on-wire byte count, NOT the underlying IQ
@@ -488,7 +517,13 @@ public final class SdrRtlTcpServer: @unchecked Sendable {
             }
         }
 
-        let codec = Compression(rawValue: c.codec) ?? .noneOnly
+        // The C field uses 0 = None / 1 = LZ4 (per
+        // `SdrRtlTcpClientInfo::codec` in the header), NOT the
+        // 0x01/0x03 capability-mask wire bytes. Decoding via
+        // `Compression(rawValue:)` was a real bug in this PR's
+        // first round — caught by CodeRabbit. Use the
+        // negotiated-codec enum.
+        let codec = NegotiatedCodec(rawValue: c.codec) ?? .none
         let role = ClientRole(rawValue: c.role) ?? .control
 
         // The `current_*` fields are valid even before the

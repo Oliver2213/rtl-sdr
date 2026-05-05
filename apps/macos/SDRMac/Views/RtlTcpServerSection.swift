@@ -32,6 +32,29 @@ private let rtlSdrSampleRates: [UInt32] = [
 // alongside the aggregate-only stats. Per-client recent-
 // commands drilldown is a separate follow-up. Issue #401.
 
+/// Format a byte count as KiB / MiB / GiB. Both the server-
+/// wide `Total bytes sent` row and the per-client `Bytes sent`
+/// row format counters this way; pulled to file scope so they
+/// share one implementation. The lifetime total grows fast at
+/// typical RTL-SDR rates (~16 Mbps for 2 Msps × 8 bits) so a
+/// plain "bytes" label gets unreadable in minutes. Per
+/// CodeRabbit on PR #624.
+fileprivate func formatRtlTcpBytes(_ bytes: UInt64) -> String {
+    let kib: UInt64 = 1_024
+    let mib: UInt64 = kib * 1_024
+    let gib: UInt64 = mib * 1_024
+    if bytes >= gib {
+        return String(format: "%.2f GiB", Double(bytes) / Double(gib))
+    }
+    if bytes >= mib {
+        return String(format: "%.2f MiB", Double(bytes) / Double(mib))
+    }
+    if bytes >= kib {
+        return String(format: "%.2f KiB", Double(bytes) / Double(kib))
+    }
+    return "\(bytes) B"
+}
+
 struct RtlTcpServerSection: View {
     @Environment(CoreModel.self) private var model
 
@@ -358,7 +381,7 @@ struct RtlTcpServerSection: View {
                     .foregroundStyle(.secondary)
             }
             LabeledContent("Total bytes sent") {
-                Text(formatBytes(stats.totalBytesSent))
+                Text(formatRtlTcpBytes(stats.totalBytesSent))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -392,25 +415,6 @@ struct RtlTcpServerSection: View {
         model.isRunning && model.sourceType == .rtlSdr
     }
 
-    /// Format a byte count as KiB / MiB / GiB. The lifetime
-    /// total grows fast at typical RTL-SDR rates (~16 Mbps for
-    /// 2 Msps × 8 bits) so a plain "bytes" label gets unreadable
-    /// in minutes.
-    private func formatBytes(_ bytes: UInt64) -> String {
-        let kib: UInt64 = 1_024
-        let mib: UInt64 = kib * 1_024
-        let gib: UInt64 = mib * 1_024
-        if bytes >= gib {
-            return String(format: "%.2f GiB", Double(bytes) / Double(gib))
-        }
-        if bytes >= mib {
-            return String(format: "%.2f MiB", Double(bytes) / Double(mib))
-        }
-        if bytes >= kib {
-            return String(format: "%.2f KiB", Double(bytes) / Double(kib))
-        }
-        return "\(bytes) B"
-    }
 }
 
 // ============================================================
@@ -437,7 +441,7 @@ private struct ClientRow: View {
         DisclosureGroup(isExpanded: $expanded) {
             // ---- Body: per-client detail rows ----
             LabeledContent("Bytes sent") {
-                Text(formatBytes(client.bytesSent))
+                Text(formatRtlTcpBytes(client.bytesSent))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -497,7 +501,7 @@ private struct ClientRow: View {
                                 .stroke(.secondary.opacity(0.4))
                         )
                 }
-                if client.codec == .noneAndLz4 {
+                if client.codec == .lz4 {
                     Text("LZ4")
                         .font(.caption2)
                         .foregroundStyle(.green)
@@ -551,19 +555,4 @@ private struct ClientRow: View {
         return String(format: "%dm %02ds", m, s)
     }
 
-    private func formatBytes(_ bytes: UInt64) -> String {
-        let kib: UInt64 = 1_024
-        let mib: UInt64 = kib * 1_024
-        let gib: UInt64 = mib * 1_024
-        if bytes >= gib {
-            return String(format: "%.2f GiB", Double(bytes) / Double(gib))
-        }
-        if bytes >= mib {
-            return String(format: "%.2f MiB", Double(bytes) / Double(mib))
-        }
-        if bytes >= kib {
-            return String(format: "%.2f KiB", Double(bytes) / Double(kib))
-        }
-        return "\(bytes) B"
-    }
 }
