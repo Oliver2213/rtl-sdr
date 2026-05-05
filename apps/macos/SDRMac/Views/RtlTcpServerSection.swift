@@ -198,18 +198,29 @@ struct RtlTcpServerSection: View {
         // yet. This toggle currently only governs the mDNS
         // advertisement so clients can stage a credential
         // prompt before connecting; the server itself still
-        // accepts every connection. Tracked in #623 — shipping
-        // the toggle now keeps the schema stable for the
-        // auth-key plumbing follow-up.
+        // accepts every connection. Tracked in #623.
+        //
+        // Stays editable while the server is running because it
+        // ONLY affects the mDNS announcement — flipping it
+        // tears down and re-publishes the advertiser with the
+        // updated TXT record so listeners on the LAN see the
+        // change without a server restart. The Compression
+        // picker and the rest of the form stay disabled mid-
+        // session because they feed `SdrRtlTcpServerConfig`
+        // which the engine applies once on dongle open. Per
+        // CodeRabbit on PR #624.
         Toggle("Advertise auth required", isOn: Binding(
             get: { model.rtlTcpServerAuthRequired },
             set: {
                 model.rtlTcpServerAuthRequired = $0
                 model.persistRtlTcpServerConfig()
+                // Re-announce when the user toggles mid-session
+                // so the LAN immediately sees the new TXT bit.
+                // No-op when stopped; safe to call regardless.
+                model.reannounceMdnsAdvertisement()
             }
         ))
-        .disabled(model.rtlTcpServerRunning)
-        .help("Sets the mDNS auth-required TXT bit so discovering clients can prompt for a key. Auth-key enforcement on the server itself is a separate follow-up (#623).")
+        .help("Sets the mDNS auth-required TXT bit so discovering clients can prompt for a key. Updates the advertisement live while the server is running. Auth-key enforcement on the server itself is a separate follow-up (#623).")
 
         // Collapsible device-defaults group. Most users keep
         // the defaults; expanding exposes the initial state the
@@ -517,9 +528,31 @@ private struct ClientRow: View {
     //  Display helpers
     // ----------------------------------------------------------
 
+    /// Render the client's tuner-gain state. Three valid
+    /// states tracked separately on the C side:
+    ///
+    /// 1. `currentGainAuto == true` — client switched to auto.
+    ///    Show "Auto" (any held value is irrelevant in auto
+    ///    mode).
+    /// 2. `currentGainAuto == false` — client switched to
+    ///    manual. They may or may not have sent a `SetTunerGain`
+    ///    yet; show the value if present, else "Manual" so the
+    ///    row distinguishes "manual mode without a value yet"
+    ///    from "no gain command at all". Per CodeRabbit on PR
+    ///    #624.
+    /// 3. `currentGainAuto == nil` — client hasn't touched gain
+    ///    settings. May still have sent a stray `SetTunerGain`
+    ///    (the C struct tracks mode and value independently);
+    ///    show the value if present, else "—".
     private var gainDisplay: String {
         if client.currentGainAuto == true {
             return "Auto"
+        }
+        if client.currentGainAuto == false {
+            if let tenths = client.currentGainTenthsDb {
+                return String(format: "%.1f dB", Double(tenths) / 10.0)
+            }
+            return "Manual"
         }
         if let tenths = client.currentGainTenthsDb {
             return String(format: "%.1f dB", Double(tenths) / 10.0)

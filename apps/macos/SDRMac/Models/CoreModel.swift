@@ -2473,6 +2473,76 @@ final class CoreModel {
         server?.stop()
     }
 
+    /// Stop the current mDNS advertiser and start a fresh one
+    /// that reflects the current observable state
+    /// (`rtlTcpServerCompression`, `rtlTcpServerAuthRequired`,
+    /// `rtlTcpServerNickname`). No-op when the server isn't
+    /// running or mDNS is disabled. Used by the panel when the
+    /// user flips an advertise-only field mid-session — server
+    /// config can't change mid-session (immutable on dongle
+    /// open), but the announcement can.
+    ///
+    /// Stays on the main actor — both `stop` and the construct-
+    /// new-advertiser hop are quick (sub-millisecond mDNS
+    /// daemon calls). Issue #417 / CodeRabbit on PR #624.
+    func reannounceMdnsAdvertisement() {
+        guard rtlTcpServerRunning else { return }
+        guard rtlTcpServerMdnsEnabled else { return }
+
+        // Snapshot tuner metadata from the existing stats so the
+        // new advertisement carries the same TXT fields the
+        // original announcement did. If stats aren't available
+        // yet (server still starting on first poll tick), fall
+        // back to the same "unknown" placeholders the start path
+        // uses.
+        let tunerName: String
+        let gainCount: UInt32
+        if let s = rtlTcpServerStats, !s.tunerName.isEmpty {
+            tunerName = s.tunerName
+            gainCount = s.gainCount
+        } else {
+            tunerName = "unknown"
+            gainCount = 0
+        }
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            ?? "0.1.0"
+        let instanceName = rtlTcpServerNickname.isEmpty
+            ? ProcessInfo.processInfo.hostName
+            : rtlTcpServerNickname
+
+        let opts = SdrRtlTcpAdvertiser.Options(
+            port: rtlTcpServerPort,
+            instanceName: instanceName,
+            hostname: "",
+            tuner: tunerName,
+            version: appVersion,
+            gains: gainCount,
+            nickname: rtlTcpServerNickname,
+            compression: rtlTcpServerCompression,
+            authRequired: rtlTcpServerAuthRequired ? true : nil
+        )
+
+        // Stop the old advertiser BEFORE constructing the new
+        // one — the mDNS daemon dedups by service name, and
+        // overlapping registrations briefly publish the old TXT
+        // record. Stop is synchronous (it joins the dispatcher);
+        // the new `init(options:)` is also synchronous to first
+        // visibility, so the swap is atomic from the LAN's
+        // perspective barring a sub-second window. mDNS clients
+        // typically poll on ~1s cadence so this is fine.
+        rtlTcpAdvertiser?.stop()
+        rtlTcpAdvertiser = nil
+
+        do {
+            rtlTcpAdvertiser = try SdrRtlTcpAdvertiser(options: opts)
+        } catch {
+            // Best-effort — surface the failure so the panel
+            // can show a warning, same shape as the initial
+            // announce-failure path. Server keeps running.
+            rtlTcpServerError = "Re-announce failed: \(error)"
+        }
+    }
+
     /// Persist the rtl_tcp server config to UserDefaults so
     /// the same values seed the next launch. Called from the
     /// UI on field edits — start() reads from the persisted
