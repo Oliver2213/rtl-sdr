@@ -25,10 +25,38 @@ private let rtlSdrSampleRates: [UInt32] = [
     3_200_000,
 ]
 
-// Pre-#391 the panel rendered a per-client recent-commands
-// activity log capped at 50 rows; the multi-client list
-// surface that replaces it lands in #496. Until then the
-// status section below shows server-wide aggregates only.
+// Pre-#391 the panel rendered a single-client status block
+// with peer address, current freq/rate/gain, and a recent-
+// commands log. The post-#391 multi-client surface replaces
+// that with a per-client list (one row per connected client)
+// alongside the aggregate-only stats. Per-client recent-
+// commands drilldown is a separate follow-up. Issue #401.
+
+/// Format a byte count as KiB / MiB / GiB. Both the server-
+/// wide `Total bytes sent` row and the per-client `Bytes sent`
+/// row format counters this way; pulled to file scope so they
+/// share one implementation. The lifetime total grows fast at
+/// typical RTL-SDR rates (~16 Mbps for 2 Msps × 8 bits) so a
+/// plain "bytes" label gets unreadable in minutes. Per
+/// CodeRabbit on PR #624.
+///
+/// `private` (not `fileprivate`) — they're equivalent at top
+/// level in Swift 4+, and SwiftLint prefers `private`.
+private func formatRtlTcpBytes(_ bytes: UInt64) -> String {
+    let kib: UInt64 = 1_024
+    let mib: UInt64 = kib * 1_024
+    let gib: UInt64 = mib * 1_024
+    if bytes >= gib {
+        return String(format: "%.2f GiB", Double(bytes) / Double(gib))
+    }
+    if bytes >= mib {
+        return String(format: "%.2f MiB", Double(bytes) / Double(mib))
+    }
+    if bytes >= kib {
+        return String(format: "%.2f KiB", Double(bytes) / Double(kib))
+    }
+    return "\(bytes) B"
+}
 
 struct RtlTcpServerSection: View {
     @Environment(CoreModel.self) private var model
@@ -141,6 +169,61 @@ struct RtlTcpServerSection: View {
             }
         ))
         .disabled(model.rtlTcpServerRunning)
+
+        // Compression picker — wires through to both the server
+        // config (`has_compression` / `compression`) and the
+        // mDNS advertise options (`has_codecs` / `codecs`) so a
+        // discovering client sees the same story over the
+        // network and at handshake. Issue #417.
+        LabeledContent("Compression") {
+            Picker("", selection: Binding(
+                get: { model.rtlTcpServerCompression },
+                set: {
+                    model.rtlTcpServerCompression = $0
+                    model.persistRtlTcpServerConfig()
+                }
+            )) {
+                ForEach(SdrRtlTcpServer.Compression.allCases, id: \.self) { c in
+                    Text(c.label).tag(c)
+                }
+            }
+            .labelsHidden()
+        }
+        .disabled(model.rtlTcpServerRunning)
+        .help("Stream-codec mask the server advertises. None keeps every client on uncompressed IQ; LZ4 negotiates compression with capable clients.")
+
+        // Auth-required mDNS toggle (#417).
+        //
+        // The actual auth-key enforcement on the rtl_tcp server
+        // (forwarding `auth_key` / `auth_key_len` through
+        // `SdrRtlTcpServerConfig`, validating the client's
+        // `RTLX SetAuthKey` packet) isn't wired on the Mac side
+        // yet. This toggle currently only governs the mDNS
+        // advertisement so clients can stage a credential
+        // prompt before connecting; the server itself still
+        // accepts every connection. Tracked in #623.
+        //
+        // Stays editable while the server is running because it
+        // ONLY affects the mDNS announcement — flipping it
+        // tears down and re-publishes the advertiser with the
+        // updated TXT record so listeners on the LAN see the
+        // change without a server restart. The Compression
+        // picker and the rest of the form stay disabled mid-
+        // session because they feed `SdrRtlTcpServerConfig`
+        // which the engine applies once on dongle open. Per
+        // CodeRabbit on PR #624.
+        Toggle("Advertise auth required", isOn: Binding(
+            get: { model.rtlTcpServerAuthRequired },
+            set: {
+                model.rtlTcpServerAuthRequired = $0
+                model.persistRtlTcpServerConfig()
+                // Re-announce when the user toggles mid-session
+                // so the LAN immediately sees the new TXT bit.
+                // No-op when stopped; safe to call regardless.
+                model.reannounceMdnsAdvertisement()
+            }
+        ))
+        .help("Sets the mDNS auth-required TXT bit so discovering clients can prompt for a key. Updates the advertisement live while the server is running. Auth-key enforcement on the server itself is a separate follow-up (#623).")
 
         // Collapsible device-defaults group. Most users keep
         // the defaults; expanding exposes the initial state the
@@ -276,13 +359,10 @@ struct RtlTcpServerSection: View {
     //  Status + activity log
     // ----------------------------------------------------------
 
-    /// Server-wide status rows. Aggregates only — per-client
-    /// detail (peer address, current freq/rate/gain, recent
-    /// commands) requires the multi-client list surface that
-    /// follows in #496. Until then the panel reports the count
-    /// of connected clients plus lifetime totals; clicking an
-    /// individual client to see its tuning state is the
-    /// follow-up.
+    /// Status rows: server-wide aggregates plus a per-client
+    /// list rendering one row per connected client (peer
+    /// address, codec, freq/rate/gain, bytes sent, drops).
+    /// Issue #401.
     @ViewBuilder
     private var statusRows: some View {
         let stats = model.rtlTcpServerStats
@@ -315,7 +395,7 @@ struct RtlTcpServerSection: View {
                     .foregroundStyle(.secondary)
             }
             LabeledContent("Total bytes sent") {
-                Text(formatBytes(stats.totalBytesSent))
+                Text(formatRtlTcpBytes(stats.totalBytesSent))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -325,6 +405,14 @@ struct RtlTcpServerSection: View {
                         .foregroundStyle(.orange)
                 }
             }
+        }
+
+        // Per-client list — one expandable row per connected
+        // client. Sourced from `clientList()` on the same poll
+        // tick as `stats` so the count above and the rows below
+        // describe the same snapshot. Issue #401.
+        ForEach(model.rtlTcpServerClients) { client in
+            ClientRow(client: client)
         }
     }
 
@@ -341,23 +429,166 @@ struct RtlTcpServerSection: View {
         model.isRunning && model.sourceType == .rtlSdr
     }
 
-    /// Format a byte count as KiB / MiB / GiB. The lifetime
-    /// total grows fast at typical RTL-SDR rates (~16 Mbps for
-    /// 2 Msps × 8 bits) so a plain "bytes" label gets unreadable
-    /// in minutes.
-    private func formatBytes(_ bytes: UInt64) -> String {
-        let kib: UInt64 = 1_024
-        let mib: UInt64 = kib * 1_024
-        let gib: UInt64 = mib * 1_024
-        if bytes >= gib {
-            return String(format: "%.2f GiB", Double(bytes) / Double(gib))
+}
+
+// ============================================================
+//  ClientRow — one expandable row per connected client
+//
+//  Renders the per-client snapshot returned by
+//  `SdrRtlTcpServer.clientList()` (#401). Header line shows
+//  the peer address + role badge + codec + uptime; the
+//  expandable disclosure body adds bytes sent, drops, the
+//  client's most recent tuning state, and the recent-command
+//  hint.
+//
+//  Identifiable on `ClientInfo.id` so SwiftUI preserves the
+//  expand/collapse state of an individual row across poll
+//  ticks even when the list reorders.
+// ============================================================
+
+private struct ClientRow: View {
+    let client: SdrRtlTcpServer.ClientInfo
+
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            // ---- Body: per-client detail rows ----
+            LabeledContent("Bytes sent") {
+                Text(formatRtlTcpBytes(client.bytesSent))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            if client.buffersDropped > 0 {
+                LabeledContent("Dropped") {
+                    Text("\(client.buffersDropped) buffer(s)")
+                        .foregroundStyle(.orange)
+                }
+            }
+            LabeledContent("Frequency") {
+                if let hz = client.currentFreqHz {
+                    Text(String(format: "%.3f MHz", Double(hz) / 1_000_000.0))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("—")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Sample rate") {
+                if let hz = client.currentSampleRateHz {
+                    Text(String(format: "%.3f Msps", Double(hz) / 1_000_000.0))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("—")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Gain") {
+                Text(gainDisplay)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            if client.recentCommandsCount > 0 {
+                LabeledContent("Recent commands") {
+                    Text(commandsDisplay)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } label: {
+            // ---- Header: peer address + role + codec + uptime
+            HStack(spacing: 8) {
+                Text(client.peerAddress.isEmpty ? "—" : client.peerAddress)
+                    .font(.body.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                if client.role == .listener {
+                    Text(client.role.label)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3)
+                                .stroke(.secondary.opacity(0.4))
+                        )
+                }
+                if client.codec == .lz4 {
+                    Text("LZ4")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+                Text(formatUptime(client.uptimeSecs))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
-        if bytes >= mib {
-            return String(format: "%.2f MiB", Double(bytes) / Double(mib))
-        }
-        if bytes >= kib {
-            return String(format: "%.2f KiB", Double(bytes) / Double(kib))
-        }
-        return "\(bytes) B"
     }
+
+    // ----------------------------------------------------------
+    //  Display helpers
+    // ----------------------------------------------------------
+
+    /// Render the client's tuner-gain state. Three valid
+    /// states tracked separately on the C side:
+    ///
+    /// 1. `currentGainAuto == true` — client switched to auto.
+    ///    Show "Auto" (any held value is irrelevant in auto
+    ///    mode).
+    /// 2. `currentGainAuto == false` — client switched to
+    ///    manual. They may or may not have sent a `SetTunerGain`
+    ///    yet; show the value if present, else "Manual" so the
+    ///    row distinguishes "manual mode without a value yet"
+    ///    from "no gain command at all". Per CodeRabbit on PR
+    ///    #624.
+    /// 3. `currentGainAuto == nil` — client hasn't touched gain
+    ///    settings. May still have sent a stray `SetTunerGain`
+    ///    (the C struct tracks mode and value independently);
+    ///    show the value if present, else "—".
+    private var gainDisplay: String {
+        if client.currentGainAuto == true {
+            return "Auto"
+        }
+        if client.currentGainAuto == false {
+            if let tenths = client.currentGainTenthsDb {
+                return String(format: "%.1f dB", Double(tenths) / 10.0)
+            }
+            return "Manual"
+        }
+        if let tenths = client.currentGainTenthsDb {
+            return String(format: "%.1f dB", Double(tenths) / 10.0)
+        }
+        return "—"
+    }
+
+    private var commandsDisplay: String {
+        let count = client.recentCommandsCount
+        let countLabel = "\(count) command\(count == 1 ? "" : "s")"
+        if let age = client.lastCommandAgeSecs {
+            return "\(countLabel) · last \(formatAge(age)) ago"
+        }
+        return countLabel
+    }
+
+    private func formatUptime(_ secs: Double) -> String {
+        let total = Int(secs.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 { return String(format: "%dh %02dm", h, m) }
+        if m > 0 { return String(format: "%dm %02ds", m, s) }
+        return "\(s)s"
+    }
+
+    private func formatAge(_ secs: Double) -> String {
+        if secs < 1 { return "<1s" }
+        let total = Int(secs.rounded())
+        if total < 60 { return "\(total)s" }
+        let m = total / 60
+        let s = total % 60
+        return String(format: "%dm %02ds", m, s)
+    }
+
 }
