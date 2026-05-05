@@ -262,6 +262,17 @@ private struct DeemphasisSection: View {
 private struct DistanceEstimatorSection: View {
     @Environment(CoreModel.self) private var model
 
+    /// Fallback noise floor used by `signalIsLocked` when squelch
+    /// is OFF and we can't rely on a closed-squelch state to gate
+    /// the distance display. -100 dBm is a typical RTL-SDR noise
+    /// floor with a stock antenna in a moderately quiet RF
+    /// environment; anything above is plausibly a real signal
+    /// worth measuring against. Conservative on purpose — better
+    /// to show "—" on a marginal signal than to display a
+    /// confidently-wrong "estimated 12,000 km" computed from
+    /// near-floor noise. Per CodeRabbit on PR #622.
+    private static let defaultNoiseFloorDb: Double = -100
+
     /// User-facing input mode: dBm directly, or watts (auto-
     /// converted to dBm via `Propagation.wattsToDbm`).
     @State private var unit: PowerUnit = .watts
@@ -376,14 +387,13 @@ private struct DistanceEstimatorSection: View {
     /// doesn't see "estimated 12,000 km" on whatever the floor
     /// happens to be. With squelch on, a closed-squelch state is
     /// the obvious "no signal" indicator. With squelch off we
-    /// can't tell, so we fall back to a fixed -100 dBm threshold
-    /// — anything above is plausibly a real signal worth
-    /// measuring.
+    /// fall back to `Self.defaultNoiseFloorDb` (see the constant's
+    /// comment for rationale).
     private var signalIsLocked: Bool {
         if model.squelchEnabled {
             return Double(model.signalLevelDb) > Double(model.squelchDb)
         }
-        return Double(model.signalLevelDb) > -100
+        return Double(model.signalLevelDb) > Self.defaultNoiseFloorDb
     }
 
     // ----------------------------------------------------------

@@ -715,6 +715,17 @@ final class CoreModel {
     /// Persisted to `UserDefaults`.
     var fsplErpDbm: Double = 30
 
+    /// Sanity range for `fsplErpDbm`. Lower bound (-30 dBm = 1 µW)
+    /// covers the weakest legal unlicensed transmitters; upper
+    /// bound (90 dBm = 1 MW) is well above any plausible
+    /// terrestrial broadcaster a hobbyist can hear with a stock
+    /// dongle. Both bootstrap restore and `setFsplErpDbm(_:)`
+    /// clamp to this range so a hand-edited plist or a
+    /// programmatic caller can't poison the FSPL math with an
+    /// absurd value that would only snap back at next launch.
+    /// Per CodeRabbit on PR #622.
+    static let fsplErpDbmRange: ClosedRange<Double> = -30...90
+
     /// UserDefaults key for the persisted ERP value. Absent key
     /// leaves the 30 dBm default intact.
     static let fsplErpDbmDefaultsKey = "SDRMac.fsplErpDbm"
@@ -846,7 +857,7 @@ final class CoreModel {
             // Sanity-clamp on load: if a hand-edited plist drops a
             // non-finite or absurd value, fall back to the default
             // rather than propagate NaN through the FSPL math.
-            if stored.isFinite, (-30...90).contains(stored) {
+            if stored.isFinite, Self.fsplErpDbmRange.contains(stored) {
                 fsplErpDbm = stored
             }
         }
@@ -1730,11 +1741,19 @@ final class CoreModel {
     /// Update the FSPL distance estimator's transmitter ERP
     /// (effective radiated power) in dBm. Pure UI state — no
     /// engine round-trip; persisted to `UserDefaults` so the
-    /// user's choice survives launches. Per issue #486.
+    /// user's choice survives launches.
+    ///
+    /// Clamps to `Self.fsplErpDbmRange` (the same range bootstrap
+    /// applies on restore) so a programmatic caller — or a
+    /// future menu action that bypasses the panel's text-field
+    /// commit path — can't poison the math with values that
+    /// would only snap back to the default at next launch. Per
+    /// issue #486 / CodeRabbit on PR #622.
     func setFsplErpDbm(_ dbm: Double) {
         guard dbm.isFinite else { return }
-        fsplErpDbm = dbm
-        UserDefaults.standard.set(dbm, forKey: Self.fsplErpDbmDefaultsKey)
+        let clamped = min(max(dbm, Self.fsplErpDbmRange.lowerBound), Self.fsplErpDbmRange.upperBound)
+        fsplErpDbm = clamped
+        UserDefaults.standard.set(clamped, forKey: Self.fsplErpDbmDefaultsKey)
     }
 
     /// Toggle loop-on-EOF for the file playback source. `true`
