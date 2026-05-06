@@ -3276,8 +3276,10 @@ dependencies = [
 name = "sdr-rtlsdr"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "rusb",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
