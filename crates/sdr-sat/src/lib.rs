@@ -244,9 +244,10 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
     // METEOR-M2 4 (NORAD 61024) deliberately omitted — launched 2024,
     // failed shortly after, no usable TLE on Celestrak (404 from the
     // GP API). Per #506.
-    // ISS SSTV — epic #472. 145.800 MHz is the primary downlink for
-    // SSTV transmission events during ARISS events; ISS rides wide-FM
-    // so the standard NFM demod path captures it cleanly.
+    // ISS SSTV — epic #472. Currently 437.550 MHz UHF (ARISS Series
+    // 31+, April 2026 onward, see #638); the catalog tracks the live
+    // operational frequency via `ISS_SSTV_DOWNLINK_HZ`. ISS rides
+    // wide-FM so the standard NFM demod path captures it cleanly.
     // `imaging_protocol: Some(Sstv)` enrolls ISS in the auto-record
     // flow: at AOS the recorder opens the SSTV viewer and signals the
     // DSP to attach the `SstvDecoder`; at LOS the per-pass directory
