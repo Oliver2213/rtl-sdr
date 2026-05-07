@@ -77,8 +77,8 @@ relying on any one.
 
 ## Antenna
 
-ARISS SSTV is currently on **437.550 MHz** narrow FM — that's the
-70 cm amateur band, **not** the 137 MHz weather-satellite band APT
+ARISS SSTV (as of May 2026) is on **437.550 MHz** narrow FM — that's
+the 70 cm amateur band, **not** the 137 MHz weather-satellite band APT
 and LRPT use, and **not** the legacy 2 m slot at 145.800 MHz that
 older guides reference (see the migration note above). You need an
 antenna that works at 70 cm; a horizontal V-dipole tuned for 137 MHz
@@ -138,9 +138,9 @@ low passes.
 
 ## FM broadcast notch filter
 
-**Unnecessary** for current ARISS SSTV at 437.550 MHz UHF.
-Broadcast FM (88-108 MHz) is far enough below 437 MHz that
-intermodulation products don't land in-channel.
+**Unnecessary** for current ARISS SSTV at 437.550 MHz UHF (as of
+May 2026). Broadcast FM (88-108 MHz) is far enough below 437 MHz
+that intermodulation products don't land in-channel.
 
 A common pager / commercial-radio band sits around 460 MHz, which
 is closer in frequency. Most stations don't see interference from
@@ -217,7 +217,8 @@ passthrough and audio recording is suppressed).
 - Tunes to 437.550 MHz
 - Switches the demod to NFM (you'll hear the SSTV warble through
   your speakers)
-- Sets the channel bandwidth to 12.5 kHz
+- Sets the channel bandwidth to 38 kHz (covers Doppler swing at UHF
+  with headroom)
 - Zeros the VFO offset
 - Opens a non-modal **ISS SSTV** viewer window alongside the main
   radio window

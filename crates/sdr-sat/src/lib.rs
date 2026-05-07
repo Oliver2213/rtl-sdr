@@ -48,7 +48,35 @@ pub const DEFAULT_SATELLITE_BANDWIDTH_HZ: u32 = 38_000;
 // below — APT/LRPT pin to 137-138 MHz; SSTV accepts both VHF 2m (145.8 legacy)
 // and UHF 70cm (437.550 current). The previous single-band IMAGING_BAND_MIN_HZ /
 // MAX_HZ constants couldn't represent SSTV's two-band reality once ARISS migrated
-// to UHF (Series 31+ events on 437.550 MHz, see #638).
+// to UHF (Series 31+ events on 437.550 MHz, see #638). The constants below are
+// the single source of truth — `allowed_bands_hz()`, the catalog's ISS entry,
+// and the test that pins the operational frequency all reference them rather
+// than re-pasting the literals.
+
+/// 137 MHz weather-satellite VHF slot (Hz, inclusive). NOAA APT and
+/// Meteor-M LRPT both downlink in this band.
+pub const WEATHER_SAT_137MHZ_BAND_HZ: (u64, u64) = (137_000_000, 138_000_000);
+
+/// 2 m amateur band (Hz, inclusive) used historically for ARISS SSTV
+/// at 145.800 MHz before the UHF migration (Series 31+, April 2026).
+/// Kept in the SSTV allowed-bands list so the catalog can flip back
+/// without code changes if a future ARISS series returns to 2 m.
+pub const SSTV_VHF_2M_BAND_HZ: (u64, u64) = (144_000_000, 148_000_000);
+
+/// 70 cm amateur band (Hz, inclusive). Current ARISS SSTV operating
+/// band — Series 31 (April 2026) and Series 32 (May 2026) are both on
+/// 437.550 MHz within this range.
+pub const SSTV_UHF_70CM_BAND_HZ: (u64, u64) = (430_000_000, 440_000_000);
+
+/// Current ARISS SSTV operational downlink (Hz). 437.550 MHz UHF
+/// 70 cm. Pinned by `iss_catalog_targets_current_ariss_uhf_frequency`
+/// — if a future ARISS series moves the frequency, the test FAILS
+/// until this constant + the catalog entry are bumped together.
+pub const ISS_SSTV_DOWNLINK_HZ: u64 = 437_550_000;
+
+/// NORAD catalog id for the ISS / ZARYA. Used both by the catalog
+/// entry and by tests that look the entry up.
+pub const ISS_NORAD_ID: u32 = 25_544;
 
 /// Imaging protocol the receiver should use for a given catalog
 /// satellite. Drives the auto-record dispatch in
@@ -99,8 +127,8 @@ impl ImagingProtocol {
     #[must_use]
     pub const fn allowed_bands_hz(&self) -> &'static [(u64, u64)] {
         match self {
-            Self::Apt | Self::Lrpt => &[(137_000_000, 138_000_000)],
-            Self::Sstv => &[(144_000_000, 148_000_000), (430_000_000, 440_000_000)],
+            Self::Apt | Self::Lrpt => &[WEATHER_SAT_137MHZ_BAND_HZ],
+            Self::Sstv => &[SSTV_VHF_2M_BAND_HZ, SSTV_UHF_70CM_BAND_HZ],
         }
     }
 }
@@ -227,14 +255,13 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
     // audible unlike LRPT's silent QPSK). Shipped in epic #472.
     KnownSatellite {
         name: "ISS (ZARYA)",
-        norad_id: 25_544,
-        // 437.550 MHz is the current ARISS SSTV operational frequency.
+        norad_id: ISS_NORAD_ID,
         // ARISS migrated SSTV from the legacy 2m slot (145.800 MHz)
         // to UHF 70cm starting with Series 31 (April 2026), and Series
         // 32 (May 8-12, 2026) is also on 437.550. See #638.
         // Note: voice contacts and packet APRS still use 145.800/145.825;
         // this catalog entry is specifically for SSTV auto-record.
-        downlink_hz: 437_550_000,
+        downlink_hz: ISS_SSTV_DOWNLINK_HZ,
         demod_mode: sdr_types::DemodMode::Nfm,
         bandwidth_hz: DEFAULT_SATELLITE_BANDWIDTH_HZ,
         imaging_protocol: Some(ImagingProtocol::Sstv),
@@ -322,9 +349,9 @@ mod tests {
             ImagingProtocol::Sstv,
         ] {
             let bands = proto.allowed_bands_hz();
-            assert!(!bands.is_empty(), "{proto:?} has empty allowed-band list",);
+            assert!(!bands.is_empty(), "{proto:?} has empty allowed-band list");
             for &(lo, hi) in bands {
-                assert!(lo <= hi, "{proto:?} has malformed band ({lo} > {hi})",);
+                assert!(lo <= hi, "{proto:?} has malformed band ({lo} > {hi})");
             }
         }
     }
@@ -338,12 +365,16 @@ mod tests {
         // frequency again, this test FAILS until the catalog is
         // bumped — which is the desired behavior, since stale
         // catalog entries record dead air during the event.
+        // Lookup is by NORAD id (25544) rather than name-substring
+        // so a future catalog rename of the ISS display name (e.g.
+        // dropping "ZARYA") doesn't silently make this assertion
+        // skip the entry.
         let iss = KNOWN_SATELLITES
             .iter()
-            .find(|s| s.name.contains("ISS"))
-            .expect("ISS in catalog");
+            .find(|s| s.norad_id == ISS_NORAD_ID)
+            .expect("ISS catalog entry (NORAD 25544)");
         assert_eq!(
-            iss.downlink_hz, 437_550_000,
+            iss.downlink_hz, ISS_SSTV_DOWNLINK_HZ,
             "ISS catalog entry should be 437.550 MHz (ARISS Series 31+ UHF)",
         );
     }
@@ -393,8 +424,8 @@ mod tests {
         // end-to-end, so the catalog entry flips from None to Some(Sstv).
         let iss = KNOWN_SATELLITES
             .iter()
-            .find(|s| s.name.contains("ISS"))
-            .expect("ISS in catalog");
+            .find(|s| s.norad_id == ISS_NORAD_ID)
+            .expect("ISS catalog entry (NORAD 25544)");
         assert_eq!(
             iss.imaging_protocol,
             Some(ImagingProtocol::Sstv),
