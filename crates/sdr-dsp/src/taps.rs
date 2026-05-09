@@ -12,11 +12,14 @@ use crate::window;
 
 /// Tap count estimation scaling factor.
 ///
-/// SDR++ uses 3.8, which gives ~45 dB stopband with Nuttall window.
-/// Fred Harris (1978) recommends ~37 for full 93 dB Nuttall stopband.
-/// We use 10.0 as a practical compromise: ~70 dB stopband rejection,
-/// good enough for SDR channel filtering without excessive CPU cost.
-const TAP_COUNT_FACTOR: f64 = 10.0;
+/// Matches SDR++ exactly: 3.8 gives ~45 dB stopband with the Nuttall
+/// window we use here. The earlier value of 10.0 was chosen for ~70 dB
+/// stopband but produced 2.6× longer filters than SDR++, with
+/// proportionally larger group delay — which smeared modulation features
+/// like the APT 2400 Hz subcarrier and the LRPT QPSK symbol shape.
+/// Aligning to SDR++'s 3.8 keeps stopband sufficient while restoring
+/// the time-domain fidelity downstream demods need.
+const TAP_COUNT_FACTOR: f64 = 3.8;
 
 /// Tolerance for detecting singular points in RRC formula.
 const RRC_SINGULARITY_EPS: f64 = 1e-12;
@@ -270,9 +273,9 @@ where
 /// specific stopband attenuation (e.g. for APT decoding where we
 /// want a known >30 dB rejection of the `2·f_carrier` rectification
 /// harmonic). [`low_pass`] uses a Nuttall window with fixed
-/// attenuation pattern (~70 dB at our chosen tap-count factor),
-/// which is overkill for some applications and not enough for
-/// others.
+/// attenuation pattern (~45 dB at our chosen tap-count factor —
+/// `TAP_COUNT_FACTOR = 3.8`, matching SDR++), which is sometimes
+/// not enough rejection for tight-tolerance demods.
 ///
 /// # Errors
 ///
@@ -477,8 +480,8 @@ mod tests {
     #[test]
     fn test_estimate_tap_count() {
         let count = estimate_tap_count(1_000.0, TEST_SAMPLE_RATE).unwrap();
-        // TAP_COUNT_FACTOR=10.0: 10 * 48000 / 1000 = 480
-        assert_eq!(count, 480);
+        // TAP_COUNT_FACTOR=3.8 (matches SDR++): 3.8 * 48000 / 1000 = 182.4 → 182 (truncated)
+        assert_eq!(count, 182);
     }
 
     #[test]

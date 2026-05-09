@@ -28,6 +28,37 @@ use if_chain::IfChain;
 /// Default audio output sample rate (Hz).
 const DEFAULT_AUDIO_SAMPLE_RATE: f64 = 48_000.0;
 
+/// Diagnostic stage-amplitude log cadence, in seconds of input data.
+/// `process()` derives a per-call sample threshold from this and the
+/// active input sample rate so the cadence is wall-clock consistent
+/// across IF rates (NFM ~50 kHz, WFM ~200 kHz, LRPT ~144 kHz, etc.).
+const STAGE_AMP_LOG_PERIOD_SECS: f64 = 1.0;
+
+/// Mean of `|c|` across a complex slice, used by `STAGE_AMP_DUMP`.
+/// Returns 0.0 on empty input. Pure observational helper.
+fn mean_abs_complex(s: &[Complex]) -> f32 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let inv_len = 1.0 / s.len() as f32;
+    s.iter()
+        .map(|c| (c.re * c.re + c.im * c.im).sqrt())
+        .sum::<f32>()
+        * inv_len
+}
+
+/// Mean of `(|l| + |r|) / 2` across a stereo slice, used by `STAGE_AMP_DUMP`.
+/// Returns 0.0 on empty input. Pure observational helper.
+fn mean_abs_stereo(s: &[Stereo]) -> f32 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let inv_len = 1.0 / s.len() as f32;
+    s.iter().map(|t| (t.l.abs() + t.r.abs()) * 0.5).sum::<f32>() * inv_len
+}
+
 /// Deemphasis mode for FM broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DeemphasisMode {
@@ -107,6 +138,15 @@ pub struct RadioModule {
     /// on FM audio output. See #331 and the
     /// `SquelchAudioEnvelope` docstring for the full reasoning.
     squelch_envelope: sdr_dsp::noise::SquelchAudioEnvelope,
+    /// Sample-count accumulator for diagnostic stage-amplitude
+    /// logging in `process()`. We log mean-abs of every stage in
+    /// the chain (input IQ → IF chain → demod → AF) once every
+    /// ~1 second of input data, so a `grep stage_amp` of the log
+    /// during a satellite pass tells us at which stage signal
+    /// becomes flat noise. Pure diagnostic — no processing impact.
+    /// Per silent-fail demod investigation following the May 2026
+    /// NOAA APT regression.
+    samples_since_last_amp_log: u64,
 }
 
 impl RadioModule {
@@ -153,6 +193,7 @@ impl RadioModule {
             resamp_buf: Vec::new(),
             demod_buf: Vec::new(),
             squelch_envelope,
+            samples_since_last_amp_log: 0,
         })
     }
 
@@ -382,6 +423,35 @@ impl RadioModule {
             .af_chain
             .process(&self.demod_buf[..demod_count], output)?;
 
+        // Diagnostic dump preparation: snapshot the pre-envelope AF
+        // amplitude before Stage 4 mutates `output`. The envelope can
+        // mute audio during a closed squelch (deliberately), so a dump
+        // taken AFTER Stage 4 alone would mispoint the failure stage
+        // for silent-chain debugging. We keep both: pre-envelope tells
+        // us what the demod produced; post-envelope tells us what the
+        // listener actually heard. Per CR round 1 finding on this PR.
+        // Pure observational; arithmetic only fires on log ticks.
+        self.samples_since_last_amp_log = self.samples_since_last_amp_log.saturating_add(n as u64);
+        // Threshold derived from the active input sample rate (fallback
+        // to demod IF rate) so the cadence is wall-clock consistent
+        // across modes. Without this, a fixed 100k-sample threshold
+        // fires every ~0.5 sec at NFM and every ~0.7 sec at LRPT —
+        // close enough to be confusing.
+        let log_rate_hz = if self.input_sample_rate > 0.0 {
+            self.input_sample_rate
+        } else {
+            self.demod.config().if_sample_rate
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let log_threshold = (log_rate_hz * STAGE_AMP_LOG_PERIOD_SECS).max(1.0).round() as u64;
+        let should_dump = self.samples_since_last_amp_log >= log_threshold;
+        // Snapshot pre-envelope AF here (output is still demod-as-written).
+        let pre_envelope_af = if should_dump {
+            mean_abs_stereo(&output[..af_count])
+        } else {
+            0.0
+        };
+
         // Stage 4: Audio squelch envelope — only when the user
         // has actually enabled squelch (manual or auto). Running
         // the envelope unconditionally would mute the first
@@ -413,6 +483,34 @@ impl RadioModule {
             // open so the first block post-enable doesn't fade in
             // from silence.
             self.squelch_envelope.reset_to_open();
+        }
+
+        // Diagnostic dump emission. Now that Stage 4 has run, we can
+        // measure the true post-envelope AF that the listener actually
+        // hears. Both `af_out_pre_envelope` and `af_out_post_envelope`
+        // are emitted: a divergence between them isolates the squelch
+        // envelope as the silencer (vs. a real demod-chain failure).
+        // Subtract `log_threshold` instead of zeroing so cadence drift
+        // doesn't compound over long-running passes. Per CR round 1.
+        if should_dump {
+            self.samples_since_last_amp_log = self
+                .samples_since_last_amp_log
+                .saturating_sub(log_threshold);
+            let input_amp = mean_abs_complex(&input[..n]);
+            let if_amp = mean_abs_complex(&self.if_buf[..n]);
+            let demod_input_amp = mean_abs_complex(demod_src);
+            let demod_output_amp = mean_abs_stereo(&self.demod_buf[..demod_count]);
+            let post_envelope_af = mean_abs_stereo(&output[..af_count]);
+            tracing::info!(
+                target: "stage_amp",
+                input_iq = format!("{input_amp:.5}"),
+                if_chain_out = format!("{if_amp:.5}"),
+                demod_in = format!("{demod_input_amp:.5}"),
+                demod_out_audio = format!("{demod_output_amp:.5}"),
+                af_out_pre_envelope = format!("{pre_envelope_af:.5}"),
+                af_out_post_envelope = format!("{post_envelope_af:.5}"),
+                "STAGE_AMP_DUMP"
+            );
         }
 
         Ok(af_count)

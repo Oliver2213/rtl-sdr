@@ -588,7 +588,7 @@ pub fn build_satellites_panel() -> SatellitesPanel {
 
     let auto_record_switch = adw::SwitchRow::builder()
         .title("Auto-record satellite passes")
-        .subtitle("Tune to the satellite, start the decoder, save the imagery at LOS. Works for NOAA APT and Meteor-M LRPT.")
+        .subtitle("Tune to the satellite, start the decoder, save the imagery at LOS. Works for Meteor-M LRPT and ARISS SSTV from the ISS.")
         .active(false)
         .build();
     recording_group.add(&auto_record_switch);
@@ -640,9 +640,9 @@ pub fn build_satellites_panel() -> SatellitesPanel {
     // no value. The recorder enforces this in `tick_idle`. Per
     // epic #469 task 7.4.
     let auto_record_audio_switch = adw::SwitchRow::builder()
-        .title("Also save audio (.wav) — APT only")
+        .title("Also save audio (.wav) — SSTV only")
         .subtitle(
-            "Capture the demodulated audio alongside the PNG (paired by filename). \
+            "Capture the demodulated audio alongside the imagery (paired by filename). \
              Has no effect on Meteor-M LRPT passes — those have a silent demod and \
              are skipped at the recorder regardless of this switch.",
         )
@@ -653,16 +653,16 @@ pub fn build_satellites_panel() -> SatellitesPanel {
     // False-colour composites — LRPT only. Off by default —
     // composites add a few PNG files per pass (one per recipe in
     // `lrpt_viewer::COMPOSITE_CATALOG`, currently 3) and not
-    // every user wants the extras. NOAA APT passes ignore this
-    // toggle by nature: APT is a single-channel format and the
-    // recorder branches on `RecorderAction::SavePng` (per-pass
-    // single PNG) vs. `RecorderAction::SaveLrptPass` (per-pass
-    // directory) before reading this switch. Per #547.
+    // every user wants the extras. SSTV passes ignore this toggle
+    // by nature: SSTV is a single-channel format and the recorder
+    // branches on `RecorderAction::SaveSstvPass` vs.
+    // `RecorderAction::SaveLrptPass` (per-pass directory) before
+    // reading this switch. Per #547.
     let auto_record_composites_switch = adw::SwitchRow::builder()
         .title("Save false-colour composites — LRPT only")
         .subtitle(
             "Write RGB composite PNGs (Natural colour, False-colour IR, Thermal IR) \
-             alongside the per-APID files. NOAA APT passes ignore this — they're \
+             alongside the per-APID files. SSTV passes ignore this — they're \
              single-channel by nature.",
         )
         .active(false)
@@ -1098,11 +1098,11 @@ pub fn format_pass_subtitle(pass: &Pass) -> String {
 
 /// Title-line countdown rendering. Examples:
 ///
-/// * `"NOAA 19 — in 1h 12m"`
-/// * `"NOAA 19 — in 4 min"`
-/// * `"NOAA 19 — starting now"`
-/// * `"NOAA 19 — in progress (3 min in)"`
-/// * `"NOAA 19 — ended"` (only seen briefly between recomputes)
+/// * `"METEOR-M2 3 — in 1h 12m"`
+/// * `"METEOR-M2 3 — in 4 min"`
+/// * `"METEOR-M2 3 — starting now"`
+/// * `"METEOR-M2 3 — in progress (3 min in)"`
+/// * `"METEOR-M2 3 — ended"` (only seen briefly between recomputes)
 #[must_use]
 pub fn format_pass_title(pass: &Pass, now: DateTime<Utc>) -> String {
     let to_start = pass.start - now;
@@ -1357,9 +1357,16 @@ mod tests {
     }
 
     fn synthetic_pass(now: DateTime<Utc>, offset_min: i64) -> Pass {
+        // Default to METEOR-M2 3 — historically this helper used
+        // "NOAA 19" but NOAA-15/18/19 were decommissioned in August
+        // 2025 and removed from `KNOWN_SATELLITES`. METEOR-M2 3 is
+        // an active LRPT satellite still in the catalog. The pass
+        // geometry below (start/end/elevation/azimuths) is
+        // satellite-agnostic — these tests exercise the panel's
+        // formatting + state, not orbital mechanics.
         let start = now + ChronoDuration::minutes(offset_min);
         Pass {
-            satellite: "NOAA 19".to_string(),
+            satellite: "METEOR-M2 3".to_string(),
             start,
             end: start + ChronoDuration::minutes(12),
             max_elevation_deg: 56.0,
@@ -1381,13 +1388,13 @@ mod tests {
 
     #[test]
     fn format_pass_subtitle_includes_quality_tag_and_downlink() {
-        // NOAA 19 with 56° peak is a "winner" tier pass; downlink
-        // is 137.100 MHz from the catalog.
+        // METEOR-M2 3 with 56° peak is a "winner" tier pass;
+        // downlink is 137.900 MHz from the catalog.
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         let pass = synthetic_pass(now, 30);
         let subtitle = format_pass_subtitle(&pass);
         assert!(subtitle.contains("winner"), "subtitle: {subtitle}");
-        assert!(subtitle.contains("137.100 MHz"), "subtitle: {subtitle}");
+        assert!(subtitle.contains("137.900 MHz"), "subtitle: {subtitle}");
     }
 
     #[test]
@@ -1440,8 +1447,8 @@ mod tests {
     #[test]
     fn downlink_hz_for_pass_finds_catalog_entry() {
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
-        let pass = synthetic_pass(now, 30); // satellite = "NOAA 19"
-        assert_eq!(downlink_hz_for_pass(&pass), Some(137_100_000));
+        let pass = synthetic_pass(now, 30); // satellite = "METEOR-M2 3"
+        assert_eq!(downlink_hz_for_pass(&pass), Some(137_900_000));
     }
 
     #[test]
@@ -1464,13 +1471,13 @@ mod tests {
         // a name → catalog re-lookup at the wiring layer (per CR
         // round 3 on PR #571).
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
-        let pass = synthetic_pass(now, 30); // satellite = "NOAA 19"
-        let target = tune_target_for_pass(&pass).expect("NOAA 19 is in catalog");
-        assert_eq!(target.0, 137_100_000);
-        assert_eq!(target.1, sdr_types::DemodMode::Nfm);
-        assert_eq!(target.2, 38_000);
-        assert_eq!(target.3, Some(sdr_sat::ImagingProtocol::Apt));
-        assert_eq!(target.4, 33_591); // NOAA 19 NORAD ID
+        let pass = synthetic_pass(now, 30); // satellite = "METEOR-M2 3"
+        let target = tune_target_for_pass(&pass).expect("METEOR-M2 3 is in catalog");
+        assert_eq!(target.0, 137_900_000);
+        assert_eq!(target.1, sdr_types::DemodMode::Lrpt);
+        assert_eq!(target.2, 144_000); // LRPT — matches IF rate so VFO bypasses channel filter
+        assert_eq!(target.3, Some(sdr_sat::ImagingProtocol::Lrpt));
+        assert_eq!(target.4, 57_166); // METEOR-M2 3 NORAD ID
     }
 
     #[test]
@@ -1483,7 +1490,7 @@ mod tests {
         // recorder, so this test pins the catalog→LRPT routing.
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         let mut pass = synthetic_pass(now, 30);
-        pass.satellite = "METEOR-M 2".to_string();
+        pass.satellite = "METEOR-M2 3".to_string();
         let target = tune_target_for_pass(&pass).expect("METEOR-M 2 is in catalog");
         assert_eq!(
             target.3,
@@ -1505,14 +1512,14 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         let pass = synthetic_pass(now, 75); // 1 h 15 min away
         let title = format_pass_title(&pass, now);
-        assert_eq!(title, "NOAA 19 — in 1h 15m");
+        assert_eq!(title, "METEOR-M2 3 — in 1h 15m");
     }
 
     #[test]
     fn format_pass_title_uses_minutes_for_near_passes() {
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         let pass = synthetic_pass(now, 12); // 12 min away
-        assert_eq!(format_pass_title(&pass, now), "NOAA 19 — in 12 min");
+        assert_eq!(format_pass_title(&pass, now), "METEOR-M2 3 — in 12 min");
     }
 
     #[test]
@@ -1520,7 +1527,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         // Pass starts in 30 seconds.
         let pass = Pass {
-            satellite: "NOAA 19".to_string(),
+            satellite: "METEOR-M2 3".to_string(),
             start: now + ChronoDuration::seconds(30),
             end: now + ChronoDuration::minutes(12),
             max_elevation_deg: 50.0,
@@ -1528,7 +1535,7 @@ mod tests {
             start_az_deg: 0.0,
             end_az_deg: 0.0,
         };
-        assert_eq!(format_pass_title(&pass, now), "NOAA 19 — starting now");
+        assert_eq!(format_pass_title(&pass, now), "METEOR-M2 3 — starting now");
     }
 
     #[test]
@@ -1552,7 +1559,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         // Pass ended 30 minutes ago.
         let pass = synthetic_pass(now, -42);
-        assert_eq!(format_pass_title(&pass, now), "NOAA 19 — ended");
+        assert_eq!(format_pass_title(&pass, now), "METEOR-M2 3 — ended");
     }
 
     #[test]
@@ -1562,7 +1569,7 @@ mod tests {
         // this code surfaced the latter — fixed via `>=`.
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         let pass = synthetic_pass(now, 60);
-        assert_eq!(format_pass_title(&pass, now), "NOAA 19 — in 1h 00m");
+        assert_eq!(format_pass_title(&pass, now), "METEOR-M2 3 — in 1h 00m");
     }
 
     #[test]
@@ -1571,7 +1578,7 @@ mod tests {
         // "in 1 min", not "starting now". `>=` fixes this.
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         let pass = synthetic_pass(now, 1);
-        assert_eq!(format_pass_title(&pass, now), "NOAA 19 — in 1 min");
+        assert_eq!(format_pass_title(&pass, now), "METEOR-M2 3 — in 1 min");
     }
 
     #[test]
@@ -1583,7 +1590,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 6, 15, 18, 0, 0).unwrap();
         // Pass started 30 seconds ago, ends in 12 minutes.
         let pass = Pass {
-            satellite: "NOAA 19".to_string(),
+            satellite: "METEOR-M2 3".to_string(),
             start: now - ChronoDuration::seconds(30),
             end: now + ChronoDuration::minutes(12),
             max_elevation_deg: 45.0,
@@ -1593,7 +1600,7 @@ mod tests {
         };
         assert_eq!(
             format_pass_title(&pass, now),
-            "NOAA 19 — in progress (1 min in)"
+            "METEOR-M2 3 — in progress (1 min in)"
         );
     }
 
