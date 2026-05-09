@@ -105,6 +105,73 @@ pub const METEOR_M2_DECOMMISSIONED_NORAD_ID: u32 = 40_069;
 /// self-documenting and can't drift from the original investigation.
 pub const USA_403_WRONG_METEOR_NORAD_ID: u32 = 61_024;
 
+/// NORAD catalog id for AMSAT-OSCAR-7 (AO-7). Launched 1974, the
+/// oldest still-operational amateur satellite. Battery failed in
+/// 1981; resurrected in 2002 when the short cleared, and runs on
+/// solar power only — silent during eclipse, audible on the
+/// sunlit half of every orbit. Carries a Mode-B linear transponder
+/// (70cm uplink → 2m downlink, LSB / CW). Per AMSAT operational
+/// status as of May 2026.
+pub const AO_7_NORAD_ID: u32 = 7_530;
+
+/// NORAD catalog id for SaudiSat-1C (SO-50). Single-channel FM
+/// voice repeater on 70 cm downlink, 2 m uplink. Launched 2002,
+/// still active for amateur QSO contacts as of May 2026. Per
+/// AMSAT operational satellite list.
+pub const SO_50_NORAD_ID: u32 = 27_607;
+
+/// NORAD catalog id for Diwata-2 (PO-101). Filipino microsat
+/// carrying an FM voice repeater + store-and-forward digital.
+/// **Operational status is intermittent** — historically scheduled
+/// in periodic activation windows; a pass with no audio is not
+/// necessarily a receive-side failure. Catalog presence still
+/// gives the pass-prediction view utility independent of whether
+/// the transmitter is keyed during any given pass.
+pub const PO_101_NORAD_ID: u32 = 43_678;
+
+/// Standard NFM bandwidth (Hz) for amateur-radio voice satellites
+/// with FM repeaters (SO-50, PO-101, …). Matches the 12.5 kHz
+/// channel spacing that's standard for narrow-band ham FM and
+/// covers the ±3 kHz deviation typical voice traffic uses.
+pub const HAM_VOICE_NFM_BANDWIDTH_HZ: u32 = 12_500;
+
+/// AO-7 LSB downlink centre (Hz). Tunes to the middle of the Mode-B
+/// linear-transponder downlink passband (145.925-145.975 MHz); the
+/// user can drag-tune across to follow individual SSB QSOs.
+pub const AO_7_DOWNLINK_HZ: u64 = 145_950_000;
+
+/// SO-50 FM voice repeater downlink (Hz). Per AMSAT.
+pub const SO_50_DOWNLINK_HZ: u64 = 436_795_000;
+
+/// PO-101 FM voice repeater downlink (Hz). Per AMSAT — operator-
+/// scheduled, intermittent activation.
+pub const PO_101_DOWNLINK_HZ: u64 = 145_900_000;
+
+/// Standard SSB bandwidth (Hz) for amateur-radio satellites with
+/// linear transponders (AO-7 …). Single-sideband voice traffic
+/// occupies ~3 kHz; the catalog enrolls the wider ham-band
+/// frequency range so the user can tune across the transponder
+/// passband by drag/click in the spectrum.
+pub const HAM_SSB_BANDWIDTH_HZ: u32 = 3_000;
+
+/// 2 m amateur band (Hz, inclusive). Same physical allocation as
+/// `SSTV_VHF_2M_BAND_HZ` but expressed under the ham-radio name
+/// because the catalog tests for AO-7 / PO-101 membership-check
+/// against the *amateur allocation*, not the SSTV-format-band
+/// (those happen to coincide at 2 m today; the names stay
+/// independent so a future schedule shift on either side doesn't
+/// silently couple them). Per CR round 2 on PR #656.
+pub const HAM_VHF_2M_BAND_HZ: (u64, u64) = (144_000_000, 148_000_000);
+
+/// 70 cm amateur band (Hz, inclusive). Wider than
+/// `SSTV_UHF_70CM_BAND_HZ` (430-440 MHz, the SSTV-format
+/// allocation slice) — the full ham 70 cm band runs 420-450 MHz
+/// in IARU Region 2. SO-50 at 436.795 MHz lives in both, but the
+/// catalog test uses the broader ham allocation so a future ham
+/// satellite at e.g. 425 MHz wouldn't fail on a too-narrow SSTV
+/// range. Per CR round 2 on PR #656.
+pub const HAM_UHF_70CM_BAND_HZ: (u64, u64) = (420_000_000, 450_000_000);
+
 /// Common downlink for METEOR-M2 series LRPT (Hz). Both M2-3 and
 /// M2-4 transmit on this channel. Centralized here so the catalog
 /// rows + the CR-noted bandwidth assertion test agree on one value.
@@ -414,6 +481,75 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         // apply.
         expected_lrpt_apids: None,
     },
+    // Amateur-radio voice satellites — #649. Pure pass-prediction
+    // entries: the user manually tunes / listens via the existing
+    // NFM (or SSB / Lsb) demod path, no auto-record path applies
+    // (`imaging_protocol: None`). Adding these keeps the
+    // Satellites panel useful between imaging passes and gives ham
+    // operators a starting set of birds to chase QSO contacts on.
+    //
+    // **Operational status verified at catalog merge time (May
+    // 2026)** — amateur satellites go in and out of service as
+    // batteries fail / power budgets shift / mission lifetimes
+    // end. Periodic re-verification against AMSAT's active list
+    // is part of the catalog maintenance contract. Decommissioned
+    // / deorbited birds we deliberately omit here:
+    // - **AO-91** (FOX-1B, NORAD 43017) — battery failed, declared
+    //   end-of-mission March 2024 by AMSAT.
+    // - **AO-92** (FOX-1D, NORAD 43137) — reentered atmosphere
+    //   November 2022.
+    // - **LilacSat-2** (NORAD 40908) — decommissioned 2024.
+    // Kept here as comments rather than catalog entries so a
+    // future re-verifier sees we considered them and chose to
+    // exclude vs. forgot to include.
+    KnownSatellite {
+        // AMSAT-OSCAR-7 (AO-7). 1974-launched Mode-B linear
+        // transponder: 70cm uplink (432.125-432.175 MHz LSB) →
+        // 2m downlink (145.925-145.975 MHz LSB). Audible on the
+        // sunlit half of every orbit (the satellite has no
+        // working battery — runs on solar only since 2002). The
+        // catalog entry tunes to the centre of the downlink
+        // passband; the user can drag-tune around to follow
+        // individual SSB QSOs across the transponder.
+        name: "AO-7 (OSCAR-7)",
+        norad_id: AO_7_NORAD_ID,
+        downlink_hz: AO_7_DOWNLINK_HZ,
+        demod_mode: sdr_types::DemodMode::Lsb,
+        bandwidth_hz: HAM_SSB_BANDWIDTH_HZ,
+        imaging_protocol: None,
+        expected_lrpt_apids: None,
+    },
+    KnownSatellite {
+        // SaudiSat-1C (SO-50). Single-channel FM voice repeater:
+        // 2m uplink (145.850 MHz, CTCSS 67 Hz) → 70cm downlink
+        // (436.795 MHz). Popular for contesting and casual QSOs.
+        // NFM voice — same demod path the user just validated on
+        // the local PD scanner.
+        name: "SO-50 (SaudiSat-1C)",
+        norad_id: SO_50_NORAD_ID,
+        downlink_hz: SO_50_DOWNLINK_HZ,
+        demod_mode: sdr_types::DemodMode::Nfm,
+        bandwidth_hz: HAM_VOICE_NFM_BANDWIDTH_HZ,
+        imaging_protocol: None,
+        expected_lrpt_apids: None,
+    },
+    KnownSatellite {
+        // PO-101 (Diwata-2 / Philippines). FM voice repeater +
+        // store-and-forward digital. Shipped with intermittent
+        // activation windows scheduled by the operator —
+        // pass-prediction is reliable, but a silent pass doesn't
+        // necessarily indicate a receive-side problem; the
+        // transmitter may simply not be keyed. Documented here
+        // so a user troubleshooting a silent PO-101 pass doesn't
+        // chase a chain bug. Per #649 caveat.
+        name: "PO-101 (Diwata-2)",
+        norad_id: PO_101_NORAD_ID,
+        downlink_hz: PO_101_DOWNLINK_HZ,
+        demod_mode: sdr_types::DemodMode::Nfm,
+        bandwidth_hz: HAM_VOICE_NFM_BANDWIDTH_HZ,
+        imaging_protocol: None,
+        expected_lrpt_apids: None,
+    },
 ];
 
 #[cfg(test)]
@@ -633,6 +769,120 @@ mod tests {
         // an IR channel) are fine — the function returns the
         // complement of expected over received, ignoring extras.
         assert!(m2_3.missing_lrpt_apids(&[64, 65, 66, 70]).is_empty());
+    }
+
+    #[test]
+    fn ao_7_is_present_with_lsb_linear_transponder() {
+        // AO-7 catalog entry pins the historical Mode-B downlink
+        // and LSB demod. If a future maintainer flips it to NFM
+        // (wrong) or USB (also wrong — Mode B uses LSB by
+        // convention), this test fails. Per #649.
+        let ao_7 = KNOWN_SATELLITES
+            .iter()
+            .find(|s| s.norad_id == AO_7_NORAD_ID)
+            .expect("AO-7 (NORAD 7530) should be in KNOWN_SATELLITES");
+        assert_eq!(ao_7.demod_mode, sdr_types::DemodMode::Lsb);
+        assert_eq!(ao_7.bandwidth_hz, HAM_SSB_BANDWIDTH_HZ);
+        assert_eq!(ao_7.imaging_protocol, None);
+        // Pin the exact downlink so a typo / band-edit can't shift
+        // the catalog away from the AMSAT-published frequency
+        // without a CR-able diff. Per CR round 1.
+        assert_eq!(ao_7.downlink_hz, AO_7_DOWNLINK_HZ);
+        // Belt-and-braces: also check the band membership so a
+        // future drag-tune helper that recentres entries can't
+        // land outside the legal 2 m amateur allocation
+        // (144-148 MHz) without a test failure.
+        assert!(
+            (HAM_VHF_2M_BAND_HZ.0..=HAM_VHF_2M_BAND_HZ.1).contains(&ao_7.downlink_hz),
+            "AO-7 downlink {} Hz should be in the 2m amateur band",
+            ao_7.downlink_hz,
+        );
+    }
+
+    #[test]
+    fn so_50_is_present_with_nfm_voice_repeater() {
+        // SO-50 catalog entry pins the 70cm FM voice downlink.
+        // Per #649. Bandwidth equals `HAM_VOICE_NFM_BANDWIDTH_HZ`
+        // so a future global change to the NFM-voice default
+        // applies here without a per-row edit.
+        let so_50 = KNOWN_SATELLITES
+            .iter()
+            .find(|s| s.norad_id == SO_50_NORAD_ID)
+            .expect("SO-50 (NORAD 27607) should be in KNOWN_SATELLITES");
+        assert_eq!(so_50.demod_mode, sdr_types::DemodMode::Nfm);
+        assert_eq!(so_50.bandwidth_hz, HAM_VOICE_NFM_BANDWIDTH_HZ);
+        assert_eq!(so_50.imaging_protocol, None);
+        // Pin the exact downlink. Per CR round 1.
+        assert_eq!(so_50.downlink_hz, SO_50_DOWNLINK_HZ);
+        // Belt-and-braces 70 cm amateur band (420-450 MHz) check.
+        assert!(
+            (HAM_UHF_70CM_BAND_HZ.0..=HAM_UHF_70CM_BAND_HZ.1).contains(&so_50.downlink_hz),
+            "SO-50 downlink {} Hz should be in the 70cm amateur band",
+            so_50.downlink_hz,
+        );
+    }
+
+    #[test]
+    fn po_101_is_present_with_nfm_voice_repeater() {
+        // PO-101 catalog entry pins the 2m FM voice downlink.
+        // Documented as "intermittent" — a silent pass is not
+        // necessarily a receive-side bug. Per #649.
+        let po_101 = KNOWN_SATELLITES
+            .iter()
+            .find(|s| s.norad_id == PO_101_NORAD_ID)
+            .expect("PO-101 (NORAD 43678) should be in KNOWN_SATELLITES");
+        assert_eq!(po_101.demod_mode, sdr_types::DemodMode::Nfm);
+        assert_eq!(po_101.bandwidth_hz, HAM_VOICE_NFM_BANDWIDTH_HZ);
+        assert_eq!(po_101.imaging_protocol, None);
+        // Pin the exact downlink. Per CR round 1.
+        assert_eq!(po_101.downlink_hz, PO_101_DOWNLINK_HZ);
+        // Belt-and-braces 2 m amateur band (144-148 MHz) check.
+        assert!(
+            (HAM_VHF_2M_BAND_HZ.0..=HAM_VHF_2M_BAND_HZ.1).contains(&po_101.downlink_hz),
+            "PO-101 downlink {} Hz should be in the 2m amateur band",
+            po_101.downlink_hz,
+        );
+    }
+
+    #[test]
+    fn decommissioned_amateur_satellites_are_absent() {
+        // AMSAT amateur satellites that have been formally
+        // decommissioned or have reentered the atmosphere as of
+        // May 2026. Pinning their absence prevents a future
+        // copy-paste from a stale guide reintroducing dead birds
+        // that would only ever produce empty pass sessions.
+        // Per #649. Sources: AMSAT operational satellite list.
+        //
+        // NORAD IDs hoisted to named test-only constants per CR
+        // round 1 — keeps the assertion loop self-documenting and
+        // matches the constant-first style used elsewhere in this
+        // module (`NOAA_15_DECOMMISSIONED_NORAD_ID`, etc.).
+        const AO_91_DECOMMISSIONED_NORAD_ID: u32 = 43_017;
+        const AO_92_DECOMMISSIONED_NORAD_ID: u32 = 43_137;
+        const LILACSAT_2_DECOMMISSIONED_NORAD_ID: u32 = 40_908;
+        for &(norad_id, name, reason) in &[
+            (
+                AO_91_DECOMMISSIONED_NORAD_ID,
+                "AO-91 (FOX-1B)",
+                "battery failed, end-of-mission March 2024",
+            ),
+            (
+                AO_92_DECOMMISSIONED_NORAD_ID,
+                "AO-92 (FOX-1D)",
+                "reentered atmosphere November 2022",
+            ),
+            (
+                LILACSAT_2_DECOMMISSIONED_NORAD_ID,
+                "LilacSat-2",
+                "decommissioned 2024",
+            ),
+        ] {
+            assert!(
+                !KNOWN_SATELLITES.iter().any(|s| s.norad_id == norad_id),
+                "decommissioned {name} (NORAD {norad_id}) should not be in \
+                 KNOWN_SATELLITES — {reason}",
+            );
+        }
     }
 
     #[test]
