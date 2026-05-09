@@ -236,9 +236,9 @@ use crate::acars_output::AcarsOutputs;
 /// [`reset_imaging_decoders`] (which logs a summary first). Lets
 /// a post-pass log analysis answer:
 /// - "Did the satellite transmit at all?" (VIS count > 0)
-/// - "How many complete images did we get?" (image_complete_count)
-/// - "Did any decode get cut short?" (lines_decoded > 0 with
-///   image_complete_count == 0 means partial — the duty-cycle
+/// - "How many complete images did we get?" (`image_complete_count`)
+/// - "Did any decode get cut short?" (`lines_decoded` > 0 with
+///   `image_complete_count` == 0 means partial — the duty-cycle
 ///   OFF window or the satellite going below horizon truncated a
 ///   mid-decode image).
 ///
@@ -3784,11 +3784,15 @@ fn reset_imaging_decoders(state: &mut DspState) {
     // shared SSTV-decoder lifecycle) shouldn't clutter the
     // trace with a "0 VIS / 0 images" line. Per #648.
     if state.sstv_pass_stats.saw_any_event() {
-        let stats = &state.sstv_pass_stats;
+        // `stats` triggered `clippy::similar_names` against the
+        // surrounding `state` binding — rename to `pass_stats` for
+        // visual distinctness while keeping the access concise.
+        // Per CI clippy round on PR #658.
+        let pass_stats = &state.sstv_pass_stats;
         tracing::info!(
-            vis_count = stats.vis_count,
-            image_complete_count = stats.image_complete_count,
-            lines_decoded = stats.lines_decoded,
+            vis_count = pass_stats.vis_count,
+            image_complete_count = pass_stats.image_complete_count,
+            lines_decoded = pass_stats.lines_decoded,
             "SSTV pass summary"
         );
     }
@@ -5155,32 +5159,54 @@ mod tests {
         // (~80 lines into the 240-line PD120 image when LOS
         // truncated it). This is the shape we expect post-#648
         // log analysis to reveal. Per #648.
+        //
+        // Burst-shape constants extracted per CR round 1 — keeps a
+        // future test reader from wondering whether 240 / 80 / 3 / 2
+        // are arbitrary or load-bearing. Each constant carries the
+        // PD120 / Series 32 reference so a rebase against a future
+        // mode change updates one place.
+        /// VIS bursts captured in the pass — Series 32 duty cycle
+        /// fits ~3 windows in a typical 7-minute overpass.
+        const ARISS_EXPECTED_VIS_BURSTS: u32 = 3;
+        /// Complete images decoded — bursts 1 + 2 finished, burst
+        /// 3 was truncated by LOS.
+        const ARISS_EXPECTED_COMPLETE_IMAGES: u32 = 2;
+        /// PD120 image height in scan lines. Used here to fully
+        /// populate bursts 1 + 2 in the synthetic event stream.
+        const ARISS_FULL_IMAGE_LINES: usize = 240;
+        /// Partial-image scan-line count for burst 3 — mid-frame
+        /// when LOS / duty-cycle OFF cut the decode short. ~1/3
+        /// of the way into the PD120 image.
+        const ARISS_PARTIAL_IMAGE_LINES: usize = 80;
+
         let mut stats = SstvPassStats::default();
 
-        // Burst 1: VIS → 240 lines → ImageComplete
+        // Burst 1: VIS → full image lines → ImageComplete
         stats.record_event(&fake_vis_event());
-        for _ in 0..240 {
+        for _ in 0..ARISS_FULL_IMAGE_LINES {
             stats.record_event(&fake_line_event());
         }
         stats.record_event(&fake_image_complete_event());
 
-        // Burst 2: VIS → 240 lines → ImageComplete
+        // Burst 2: VIS → full image lines → ImageComplete
         stats.record_event(&fake_vis_event());
-        for _ in 0..240 {
+        for _ in 0..ARISS_FULL_IMAGE_LINES {
             stats.record_event(&fake_line_event());
         }
         stats.record_event(&fake_image_complete_event());
 
-        // Burst 3: VIS → 80 lines → LOS (partial)
+        // Burst 3: VIS → partial lines → LOS (no ImageComplete)
         stats.record_event(&fake_vis_event());
-        for _ in 0..80 {
+        for _ in 0..ARISS_PARTIAL_IMAGE_LINES {
             stats.record_event(&fake_line_event());
         }
-        // No ImageComplete for burst 3.
 
-        assert_eq!(stats.vis_count, 3);
-        assert_eq!(stats.image_complete_count, 2);
-        assert_eq!(stats.lines_decoded, 240 + 240 + 80);
+        assert_eq!(stats.vis_count, ARISS_EXPECTED_VIS_BURSTS);
+        assert_eq!(stats.image_complete_count, ARISS_EXPECTED_COMPLETE_IMAGES);
+        assert_eq!(
+            stats.lines_decoded,
+            (ARISS_FULL_IMAGE_LINES * 2 + ARISS_PARTIAL_IMAGE_LINES) as u64,
+        );
         // The "partial image" diagnostic: vis_count > image_complete_count
         // AND lines_decoded > 0 means we got imagery but lost it
         // before the final scan-line.
