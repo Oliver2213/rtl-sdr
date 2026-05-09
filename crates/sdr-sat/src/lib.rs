@@ -78,6 +78,28 @@ pub const ISS_SSTV_DOWNLINK_HZ: u64 = 437_550_000;
 /// entry and by tests that look the entry up.
 pub const ISS_NORAD_ID: u32 = 25_544;
 
+/// NORAD catalog id for METEOR-M2 3. Active LRPT downlink as of 2026.
+pub const METEOR_M2_3_NORAD_ID: u32 = 57_166;
+
+/// NORAD catalog id for METEOR-M2 4. Active LRPT downlink as of 2026 —
+/// per #645 investigation, currently the easier first-decode target than
+/// M2-3 because it transmits the standard channel format (c1/c2/c4)
+/// SatDump's presets expect.
+pub const METEOR_M2_4_NORAD_ID: u32 = 59_051;
+
+/// NORAD catalog id for METEOR-M 2 (the original; **excluded** from
+/// `KNOWN_SATELLITES` due to battery damage from a 2022 micrometeorite
+/// collision). Surface as a constant so the absence-pin test and any
+/// future audit reference one canonical value.
+pub const METEOR_M2_DECOMMISSIONED_NORAD_ID: u32 = 40_069;
+
+/// NORAD catalog id for USA 403 (a classified satellite at 70°
+/// inclination that some hobbyist references **incorrectly** quote as
+/// the METEOR-M2 4 NORAD id). Surface as a constant so the "do not
+/// reintroduce 61024 under a METEOR alias" absence-pin test is
+/// self-documenting and can't drift from the original investigation.
+pub const USA_403_WRONG_METEOR_NORAD_ID: u32 = 61_024;
+
 /// Common downlink for METEOR-M2 series LRPT (Hz). Both M2-3 and
 /// M2-4 transmit on this channel. Centralized here so the catalog
 /// rows + the CR-noted bandwidth assertion test agree on one value.
@@ -235,7 +257,7 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
     // downlink. See doc comment on `KNOWN_SATELLITES` above.
     KnownSatellite {
         name: "METEOR-M2 3",
-        norad_id: 57_166,
+        norad_id: METEOR_M2_3_NORAD_ID,
         downlink_hz: METEOR_M2_LRPT_DOWNLINK_HZ,
         demod_mode: sdr_types::DemodMode::Lrpt,
         // See `METEOR_M2_LRPT_BANDWIDTH_HZ` for the bypass-the-VFO
@@ -259,7 +281,7 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         // and operational status per
         // <https://usradioguy.com/meteor-satellite/>.
         name: "METEOR-M2 4",
-        norad_id: 59_051,
+        norad_id: METEOR_M2_4_NORAD_ID,
         downlink_hz: METEOR_M2_LRPT_DOWNLINK_HZ,
         demod_mode: sdr_types::DemodMode::Lrpt,
         bandwidth_hz: METEOR_M2_LRPT_BANDWIDTH_HZ,
@@ -293,6 +315,17 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Historical NOAA-15 NORAD id. Decommissioned 2025-08-19; pinned
+    /// here for the absence test so future copy-paste can't reintroduce
+    /// the dark satellite under a Cubesat alias.
+    const NOAA_15_DECOMMISSIONED_NORAD_ID: u32 = 25_338;
+    /// Historical NOAA-18 NORAD id. Decommissioned 2025-06-06.
+    /// See `NOAA_15_DECOMMISSIONED_NORAD_ID`.
+    const NOAA_18_DECOMMISSIONED_NORAD_ID: u32 = 28_654;
+    /// Historical NOAA-19 NORAD id. Decommissioned 2025-08-13.
+    /// See `NOAA_15_DECOMMISSIONED_NORAD_ID`.
+    const NOAA_19_DECOMMISSIONED_NORAD_ID: u32 = 33_591;
 
     #[test]
     fn known_satellites_have_unique_norad_ids() {
@@ -345,9 +378,9 @@ mod tests {
         // so the auto-record path never fires daily empty WAV
         // recordings on dead birds.
         for &(norad_id, name) in &[
-            (25_338_u32, "NOAA-15"),
-            (28_654, "NOAA-18"),
-            (33_591, "NOAA-19"),
+            (NOAA_15_DECOMMISSIONED_NORAD_ID, "NOAA-15"),
+            (NOAA_18_DECOMMISSIONED_NORAD_ID, "NOAA-18"),
+            (NOAA_19_DECOMMISSIONED_NORAD_ID, "NOAA-19"),
         ] {
             assert!(
                 !KNOWN_SATELLITES.iter().any(|s| s.norad_id == norad_id),
@@ -367,7 +400,7 @@ mod tests {
         // fires on its passes.
         let m2_4 = KNOWN_SATELLITES
             .iter()
-            .find(|s| s.norad_id == 59_051)
+            .find(|s| s.norad_id == METEOR_M2_4_NORAD_ID)
             .expect("METEOR-M2 4 (NORAD 59051) should be in KNOWN_SATELLITES");
         assert_eq!(m2_4.downlink_hz, METEOR_M2_LRPT_DOWNLINK_HZ);
         assert_eq!(m2_4.demod_mode, sdr_types::DemodMode::Lrpt);
@@ -381,7 +414,9 @@ mod tests {
         // stale source can't reintroduce 61024 (USA 403) under a
         // METEOR alias.
         assert!(
-            !KNOWN_SATELLITES.iter().any(|s| s.norad_id == 61_024),
+            !KNOWN_SATELLITES
+                .iter()
+                .any(|s| s.norad_id == USA_403_WRONG_METEOR_NORAD_ID),
             "NORAD 61024 is USA 403, NOT METEOR-M2 4 — must not be in KNOWN_SATELLITES",
         );
     }
@@ -395,7 +430,9 @@ mod tests {
         // HRPT also ceased July 2024. Excluded from KNOWN_SATELLITES
         // so the recorder never queues empty pass sessions on it.
         assert!(
-            !KNOWN_SATELLITES.iter().any(|s| s.norad_id == 40_069),
+            !KNOWN_SATELLITES
+                .iter()
+                .any(|s| s.norad_id == METEOR_M2_DECOMMISSIONED_NORAD_ID),
             "METEOR-M 2 (NORAD 40069) should not be in KNOWN_SATELLITES — battery dead",
         );
     }
