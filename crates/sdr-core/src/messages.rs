@@ -853,6 +853,14 @@ mod tests {
         let fft_rate = UiToDsp::SetFftRate(30.0);
         assert!(matches!(fft_rate, UiToDsp::SetFftRate(r) if (r - 30.0).abs() < f64::EPSILON));
 
+        // FFT compute gate (#646 / #647) — both polarities so a
+        // future refactor that flips the payload type or renames
+        // the variant trips this regression net.
+        let fft_on = UiToDsp::SetFftEnabled(true);
+        assert!(matches!(fft_on, UiToDsp::SetFftEnabled(true)));
+        let fft_off = UiToDsp::SetFftEnabled(false);
+        assert!(matches!(fft_off, UiToDsp::SetFftEnabled(false)));
+
         let hp = UiToDsp::SetHighPass(true);
         assert!(matches!(hp, UiToDsp::SetHighPass(true)));
 

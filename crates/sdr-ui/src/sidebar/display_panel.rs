@@ -227,7 +227,9 @@ pub fn build_display_panel() -> DisplayPanel {
     let waterfall_enabled_row = adw::SwitchRow::builder()
         .title("Show waterfall")
         .subtitle("Disable to save CPU when listening only — audio + recording unaffected")
-        .active(true)
+        // Reference the named default so a future flip applies in
+        // one place. Per CR round 1.
+        .active(DEFAULT_WATERFALL_ENABLED)
         .build();
 
     // --- Averaging Mode ---

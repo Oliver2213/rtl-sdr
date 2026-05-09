@@ -319,7 +319,7 @@ pub struct AppState {
     /// `waterfall_window_minimized` to drive the DSP-side
     /// `SetFftEnabled` gate — see `resolve_waterfall_gate`. Per #646.
     pub waterfall_user_enabled: Cell<bool>,
-    /// Transient window-minimize state. Updated by the GdkToplevel
+    /// Transient window-minimize state. Updated by the `GdkToplevel`
     /// state-notify handler when the compositor reports the
     /// application window is minimized; reverted when restored.
     /// Combines with `waterfall_user_enabled` to suspend FFT

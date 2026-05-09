@@ -747,25 +747,52 @@ pub fn build_window(
             };
             let state_inner = Rc::clone(&state_min);
             let spectrum_inner = Rc::clone(&spectrum_min);
+
+            // Shared logic for both the initial seed and every
+            // subsequent state change. `connect_state_notify` only
+            // fires when the property changes — not at handler
+            // attachment — so a window that's already minimized at
+            // realize-time would otherwise leave the FFT gate open
+            // until the next state transition. Per CR round 1 on
+            // PR #653.
+            let apply_minimized =
+                |minimized: bool, state: &Rc<AppState>, spectrum: &spectrum::SpectrumHandle| {
+                    let prev = state.waterfall_window_minimized.replace(minimized);
+                    if prev == minimized {
+                        return;
+                    }
+                    let resolved = state.resolve_and_send_waterfall_gate();
+                    // Clear when the gate is going off so the first
+                    // paint after restore doesn't show stale data while
+                    // the FFT compute is suspended. Per #647.
+                    if !resolved {
+                        spectrum.clear_displays();
+                    }
+                    tracing::info!(
+                        minimized,
+                        "window minimize state changed — waterfall gate resolved (#647)"
+                    );
+                };
+
+            // Initial seed: read whatever state the toplevel was in
+            // at realize time. Most launches start non-minimized
+            // (apply_minimized's `prev == minimized` early-return
+            // makes this a no-op there); the unusual case is a
+            // session-restored minimize from the WM, where this
+            // line catches it before any state-notify would.
+            apply_minimized(
+                toplevel
+                    .state()
+                    .contains(gtk4::gdk::ToplevelState::MINIMIZED),
+                &state_inner,
+                &spectrum_inner,
+            );
+
             toplevel.connect_state_notify(move |t| {
-                let minimized = t.state().contains(gtk4::gdk::ToplevelState::MINIMIZED);
-                let prev = state_inner.waterfall_window_minimized.get();
-                if prev == minimized {
-                    return;
-                }
-                state_inner.waterfall_window_minimized.set(minimized);
-                let resolved = state_inner.resolve_and_send_waterfall_gate();
-                // Clear when going off (about to be hidden anyway,
-                // but the unminimize-then-toggle-off path needs the
-                // surface blanked so the first paint after restore
-                // doesn't show stale data while the FFT is paused).
-                // Per #647.
-                if !resolved {
-                    spectrum_inner.clear_displays();
-                }
-                tracing::info!(
-                    minimized,
-                    "window minimize state changed — waterfall gate resolved (#647)"
+                apply_minimized(
+                    t.state().contains(gtk4::gdk::ToplevelState::MINIMIZED),
+                    &state_inner,
+                    &spectrum_inner,
                 );
             });
         });

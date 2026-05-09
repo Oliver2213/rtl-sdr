@@ -190,12 +190,26 @@ mod tests {
         }
         assert_eq!(r.count, 4, "push should bump count");
         assert_eq!(r.write_pos, 4, "push should advance write head");
-        assert_ne!(r.samples[0], f32::NEG_INFINITY, "samples populated");
+        // `is_finite()` is sentinel-aware: NEG_INFINITY is not finite,
+        // any pushed dB sample is. Avoids the `clippy::float_cmp` lint
+        // that direct equality against NEG_INFINITY would trigger.
+        assert!(r.samples[0].is_finite(), "samples populated");
 
         r.clear();
 
         assert_eq!(r.count, 0);
         assert_eq!(r.write_pos, 0);
-        assert!(r.samples.iter().all(|s| *s == f32::NEG_INFINITY));
+        // Every slot must be the NEG_INFINITY sentinel post-clear.
+        // `is_infinite() && is_sign_negative()` is the lint-clean
+        // way to assert "this is exactly NEG_INFINITY" without a
+        // direct float-compare. Stricter than `!is_finite()` because
+        // it rejects positive infinity and NaN — both would indicate
+        // a bug in `clear()`.
+        assert!(
+            r.samples
+                .iter()
+                .all(|s| s.is_infinite() && s.is_sign_negative()),
+            "every slot must be NEG_INFINITY post-clear",
+        );
     }
 }
