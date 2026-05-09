@@ -35,13 +35,18 @@ pub use postal_lookup::{PostalLocation, PostalLookupError, lookup_us_zip};
 pub use sgp4_core::{Satellite, SatelliteError};
 pub use tle_cache::{TleCache, TleCacheError, celestrak_gp_url};
 
-/// Default channel bandwidth (Hz) for every catalog entry. APT,
-/// LRPT, and ISS SSTV all need ~38 kHz of headroom past the NFM
-/// 12.5 kHz default to capture the full subcarrier spectrum without
-/// clipping the brighter / darker extremes. Hoisted to a module
-/// constant so the same number doesn't get pasted into every
-/// catalog row — and so a future re-tune of the default applies
-/// everywhere consistently.
+/// Default channel bandwidth (Hz) for catalog entries that use the
+/// standard NFM-style audio path — APT (decoder dormant pending a
+/// future Cubesat) and ISS SSTV. Both need ~38 kHz of headroom past
+/// the NFM 12.5 kHz default to capture the full subcarrier spectrum
+/// without clipping the brighter / darker extremes.
+///
+/// **Not used by LRPT.** Meteor-M LRPT entries pin
+/// `METEOR_M2_LRPT_BANDWIDTH_HZ` (144 kHz) to bypass the VFO
+/// channel filter so the 108 kHz QPSK signal is preserved end-to-end
+/// — using this default would chop the QPSK content at ±19 kHz and
+/// prevent the demod from locking. Hoisted to a module constant so
+/// the same number doesn't get pasted into every catalog row.
 pub const DEFAULT_SATELLITE_BANDWIDTH_HZ: u32 = 38_000;
 
 // Per-protocol allowed-band lookup lives on `ImagingProtocol::allowed_bands_hz`
@@ -84,7 +89,7 @@ pub const METEOR_M2_3_NORAD_ID: u32 = 57_166;
 /// NORAD catalog id for METEOR-M2 4. Active LRPT downlink as of 2026 —
 /// per #645 investigation, currently the easier first-decode target than
 /// M2-3 because it transmits the standard channel format (c1/c2/c4)
-/// SatDump's presets expect.
+/// `SatDump`'s presets expect.
 pub const METEOR_M2_4_NORAD_ID: u32 = 59_051;
 
 /// NORAD catalog id for METEOR-M 2 (the original; **excluded** from
@@ -197,9 +202,13 @@ pub struct KnownSatellite {
     /// differently without a special case in the wiring layer.
     pub demod_mode: sdr_types::DemodMode,
     /// Channel bandwidth (Hz) the receiver should use for this
-    /// satellite. APT / LRPT / SSTV all need ~38 kHz of headroom
-    /// past the NFM default 12.5 kHz to capture the full subcarrier
-    /// spectrum without clipping the brighter / darker extremes.
+    /// satellite. APT and SSTV use ~38 kHz of headroom past the NFM
+    /// default 12.5 kHz (`DEFAULT_SATELLITE_BANDWIDTH_HZ`) to capture
+    /// the full subcarrier spectrum without clipping the brighter /
+    /// darker extremes. LRPT entries instead pin
+    /// `METEOR_M2_LRPT_BANDWIDTH_HZ` (144 kHz, matching
+    /// `sdr_dsp::lrpt::SAMPLE_RATE_HZ`) so the VFO channel filter is
+    /// bypassed and the 108 kHz QPSK signal is preserved end-to-end.
     /// Same per-satellite philosophy as `demod_mode` — the catalog
     /// entry is the single source of truth so the play button can
     /// dispatch a `SetBandwidth` without re-deriving the value from
@@ -522,9 +531,11 @@ mod tests {
         // an entry with `Some(ImagingProtocol::Apt)`; the per-protocol
         // band check would gate the downlink frequency.
 
-        // METEOR satellites → Lrpt (epic #469 task 7). Both
-        // METEOR-M 2 and METEOR-M2 3 ship with Some(Lrpt) once
-        // the live LRPT viewer + decoder driver are wired.
+        // METEOR satellites → Lrpt (epic #469 task 7). The live
+        // catalog pair is METEOR-M2 3 + METEOR-M2 4 — both ship
+        // with `Some(Lrpt)`. METEOR-M 2 (the original) is excluded
+        // due to battery damage from a 2022 micrometeorite collision
+        // (see `meteor_m_2_is_excluded_due_to_battery_damage` test).
         let meteors: Vec<&KnownSatellite> = KNOWN_SATELLITES
             .iter()
             .filter(|s| s.name.starts_with("METEOR"))
