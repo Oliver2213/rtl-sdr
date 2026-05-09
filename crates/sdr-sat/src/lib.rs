@@ -182,35 +182,34 @@ pub struct KnownSatellite {
 }
 
 /// Built-in catalog. Order is the order the scheduler UI displays.
+///
+/// **Decommissioned / disabled satellites we deliberately omit:**
+///
+/// - **NOAA-15 / NOAA-18 / NOAA-19** (the legacy POES birds that historically
+///   transmitted APT on 137 MHz) were decommissioned by NOAA in 2025:
+///   NOAA-18 on 2025-06-06, NOAA-19 on 2025-08-13, NOAA-15 on 2025-08-19.
+///   Their transmitters are powered off; the satellites remain in orbit
+///   in a safe electrical state but transmit nothing. APT mode is no
+///   longer broadcast by any operational satellite. Per
+///   <https://www.ospo.noaa.gov/data/messages/2025/08/MSG_20250820_1410.html>.
+///
+/// - **METEOR-M 2 (NORAD 40069)** suffered a micrometeorite collision in
+///   late 2022 and lost battery capacity. Per <https://usradioguy.com/meteor-satellite/>:
+///   *"there is insufficient battery power to enable the LRPT stream.
+///   HRPT transmissions ceased in July 2024."* The satellite is still
+///   in orbit and tracked but cannot downlink imaging data — every pass
+///   would queue an empty recording session.
+///
+/// We intentionally keep the APT decoder code (`sdr_dsp::apt`,
+/// `sdr_radio::apt_image`, controller's `apt_decode_tap`) in place so
+/// that any future Cubesat or amateur satellite that resurrects the
+/// 137 MHz APT format can be added to the catalog without re-porting
+/// the decoder. The LRPT decoder + Meteor catalog stay live for the
+/// active M2-3 / M2-4 birds.
 pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
-    // NOAA APT — epic #468
-    KnownSatellite {
-        name: "NOAA 15",
-        norad_id: 25_338,
-        downlink_hz: 137_620_000,
-        demod_mode: sdr_types::DemodMode::Nfm,
-        bandwidth_hz: DEFAULT_SATELLITE_BANDWIDTH_HZ,
-        imaging_protocol: Some(ImagingProtocol::Apt),
-    },
-    KnownSatellite {
-        name: "NOAA 18",
-        norad_id: 28_654,
-        downlink_hz: 137_912_500,
-        demod_mode: sdr_types::DemodMode::Nfm,
-        bandwidth_hz: DEFAULT_SATELLITE_BANDWIDTH_HZ,
-        imaging_protocol: Some(ImagingProtocol::Apt),
-    },
-    KnownSatellite {
-        name: "NOAA 19",
-        norad_id: 33_591,
-        downlink_hz: 137_100_000,
-        demod_mode: sdr_types::DemodMode::Nfm,
-        bandwidth_hz: DEFAULT_SATELLITE_BANDWIDTH_HZ,
-        imaging_protocol: Some(ImagingProtocol::Apt),
-    },
-    // Meteor-M LRPT — epic #469. Note: METEOR-M 2 and NOAA 19 share
-    // the 137.100 MHz channel — they're never on simultaneously by
-    // design. The pass scheduler picks whichever is overhead.
+    // Meteor-M LRPT — epic #469. Both M2-3 and M2-4 transmit on
+    // 137.900 MHz with 72 ksym/s QPSK and APIDs 64/65/67. They're in
+    // different orbital planes so they don't conflict simultaneously.
     // `imaging_protocol: Some(Lrpt)` enrolls these in the
     // auto-record flow per epic #469 task 7. The recorder
     // constructor's `supported_protocols` set now includes
@@ -218,32 +217,46 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
     // LRPT viewer + signals the DSP to attach the decoder, and
     // the LOS save walks every decoded APID into a per-pass
     // directory.
-    KnownSatellite {
-        name: "METEOR-M 2",
-        norad_id: 40_069,
-        downlink_hz: 137_100_000,
-        // LRPT mode runs the IF chain at 144 ksps and feeds the
-        // post-VFO IQ straight into the QPSK demod + FEC chain
-        // via the controller's `lrpt_decode_tap` (epic #469
-        // task 7.3). NFM would smear the QPSK constellation.
-        demod_mode: sdr_types::DemodMode::Lrpt,
-        // `set_bandwidth` is a no-op in LRPT mode (the demod's
-        // channel filter is locked at the IF rate); we keep the
-        // shared default for consistency with other entries.
-        bandwidth_hz: DEFAULT_SATELLITE_BANDWIDTH_HZ,
-        imaging_protocol: Some(ImagingProtocol::Lrpt),
-    },
+    //
+    // METEOR-M 2 (40069) is intentionally absent — battery damage from
+    // a 2022 micrometeorite collision means it can't power the LRPT
+    // downlink. See doc comment on `KNOWN_SATELLITES` above.
     KnownSatellite {
         name: "METEOR-M2 3",
         norad_id: 57_166,
         downlink_hz: 137_900_000,
         demod_mode: sdr_types::DemodMode::Lrpt,
-        bandwidth_hz: DEFAULT_SATELLITE_BANDWIDTH_HZ,
+        // 144 kHz matches the LRPT IF rate so the VFO channel
+        // filter is bypassed (`bandwidth >= out_sample_rate` skips
+        // the channel filter). LRPT QPSK at 72 kbaud occupies
+        // ±55 kHz around DC after RRC pulse shaping; a narrower
+        // setting would chop the signal energy and prevent the
+        // QPSK demod from locking. Per #638.
+        bandwidth_hz: 144_000,
         imaging_protocol: Some(ImagingProtocol::Lrpt),
     },
-    // METEOR-M2 4 (NORAD 61024) deliberately omitted — launched 2024,
-    // failed shortly after, no usable TLE on Celestrak (404 from the
-    // GP API). Per #506.
+    KnownSatellite {
+        // METEOR-M2 4 launched in 2024 and is actively transmitting
+        // LRPT — same downlink as M2-3 (137.900 MHz, 72 kbaud, APIDs
+        // 64/65/67), different orbital plane so the two never contend
+        // for the same pass.
+        //
+        // **NORAD id is 59051**, NOT 61024. The original #506
+        // exclusion and some hobbyist references quote 61024, which
+        // is actually USA 403 — an unrelated classified satellite at
+        // 70° inclination. Real METEOR-M2 4 sits at 98.7° polar
+        // sun-sync (COSPAR 2024-039A) and lives in Celestrak's
+        // weather group. Source:
+        // <https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle>
+        // and operational status per
+        // <https://usradioguy.com/meteor-satellite/>.
+        name: "METEOR-M2 4",
+        norad_id: 59_051,
+        downlink_hz: 137_900_000,
+        demod_mode: sdr_types::DemodMode::Lrpt,
+        bandwidth_hz: 144_000,
+        imaging_protocol: Some(ImagingProtocol::Lrpt),
+    },
     // ISS SSTV — epic #472. Currently 437.550 MHz UHF (ARISS Series
     // 31+, April 2026 onward, see #638); the catalog tracks the live
     // operational frequency via `ISS_SSTV_DOWNLINK_HZ`. ISS rides
@@ -287,26 +300,80 @@ mod tests {
     }
 
     #[test]
-    fn known_satellites_cover_all_three_epics() {
+    fn known_satellites_cover_live_imaging_protocols() {
+        // After the August 2025 NOAA POES decommissioning, the live
+        // imaging protocols our catalog still ships are LRPT (Meteor-M
+        // family) and SSTV (ISS / ARISS events). APT is preserved as
+        // a decoder + protocol enum variant for any future Cubesat
+        // resurrection, but no satellite currently transmits APT, so
+        // the catalog has no APT entries.
         let names: Vec<&str> = KNOWN_SATELLITES.iter().map(|s| s.name).collect();
-        // NOAA APT
-        assert!(names.iter().any(|n| n.contains("NOAA")));
-        // Meteor-M LRPT
-        assert!(names.iter().any(|n| n.contains("METEOR")));
-        // ISS SSTV
-        assert!(names.iter().any(|n| n.contains("ISS")));
+        assert!(
+            names.iter().any(|n| n.contains("METEOR")),
+            "catalog should carry at least one METEOR (LRPT) entry",
+        );
+        assert!(
+            names.iter().any(|n| n.contains("ISS")),
+            "catalog should carry the ISS (SSTV) entry",
+        );
     }
 
     #[test]
-    fn meteor_m2_4_is_dropped_from_catalog() {
-        // NORAD 61024 (METEOR-M2 4) launched 2024 and failed shortly
-        // after — Celestrak's GP API returns 404 for it. Per #506,
-        // the entry is intentionally absent so refreshes don't
-        // accumulate per-call warn logs for a satellite that will
-        // never produce a pass.
+    fn decommissioned_noaa_poes_are_absent() {
+        // NOAA-15, NOAA-18, NOAA-19 (the legacy POES birds that
+        // historically transmitted 137 MHz APT) were decommissioned
+        // in mid-2025. No live transmitters remain; the satellites
+        // sit dark in orbit. Their entries are intentionally absent
+        // so the auto-record path never fires daily empty WAV
+        // recordings on dead birds.
+        for &(norad_id, name) in &[
+            (25_338_u32, "NOAA-15"),
+            (28_654, "NOAA-18"),
+            (33_591, "NOAA-19"),
+        ] {
+            assert!(
+                !KNOWN_SATELLITES.iter().any(|s| s.norad_id == norad_id),
+                "decommissioned {name} (NORAD {norad_id}) should not be in KNOWN_SATELLITES",
+            );
+        }
+    }
+
+    #[test]
+    fn meteor_m2_4_is_present_and_lrpt() {
+        // METEOR-M2 4 is NORAD 59051 (NOT 61024 — that's USA 403, an
+        // unrelated classified satellite at 70° inclination). The
+        // real M2-4 is in Celestrak's weather group at 98.7°
+        // sun-sync, COSPAR 2024-039A, and is actively transmitting
+        // LRPT on 137.900 MHz with the same APID set as M2-3. The
+        // catalog ships it as `Some(Lrpt)` so the auto-record flow
+        // fires on its passes.
+        let m2_4 = KNOWN_SATELLITES
+            .iter()
+            .find(|s| s.norad_id == 59_051)
+            .expect("METEOR-M2 4 (NORAD 59051) should be in KNOWN_SATELLITES");
+        assert_eq!(m2_4.downlink_hz, 137_900_000);
+        assert_eq!(m2_4.demod_mode, sdr_types::DemodMode::Lrpt);
+        assert_eq!(m2_4.imaging_protocol, Some(ImagingProtocol::Lrpt));
+        // Pin the wrong-id absence so a future copy-paste from a
+        // stale source can't reintroduce 61024 (USA 403) under a
+        // METEOR alias.
         assert!(
             !KNOWN_SATELLITES.iter().any(|s| s.norad_id == 61_024),
-            "METEOR-M2 4 (NORAD 61024) should not be in KNOWN_SATELLITES",
+            "NORAD 61024 is USA 403, NOT METEOR-M2 4 — must not be in KNOWN_SATELLITES",
+        );
+    }
+
+    #[test]
+    fn meteor_m_2_is_excluded_due_to_battery_damage() {
+        // METEOR-M 2 (NORAD 40069) suffered a 2022 micrometeorite
+        // collision that depleted its batteries — per
+        // <https://usradioguy.com/meteor-satellite/>: "there is
+        // insufficient battery power to enable the LRPT stream".
+        // HRPT also ceased July 2024. Excluded from KNOWN_SATELLITES
+        // so the recorder never queues empty pass sessions on it.
+        assert!(
+            !KNOWN_SATELLITES.iter().any(|s| s.norad_id == 40_069),
+            "METEOR-M 2 (NORAD 40069) should not be in KNOWN_SATELLITES — battery dead",
         );
     }
 
@@ -389,18 +456,12 @@ mod tests {
         // from None → Some (or vice versa) IS a behavior change
         // that should fail this test.
         //
-        // NOAA satellites → Apt (shipped in epic #468 / PR #513).
-        for s in KNOWN_SATELLITES
-            .iter()
-            .filter(|s| s.name.starts_with("NOAA"))
-        {
-            assert_eq!(
-                s.imaging_protocol,
-                Some(ImagingProtocol::Apt),
-                "{} should be APT (NOAA APT shipped in epic #468)",
-                s.name,
-            );
-        }
+        // NOAA legacy POES (15/18/19) were decommissioned in 2025
+        // and are absent from the catalog — `decommissioned_noaa_poes_are_absent`
+        // pins that. Any future Cubesat resurrecting APT would re-add
+        // an entry with `Some(ImagingProtocol::Apt)`; the per-protocol
+        // band check would gate the downlink frequency.
+
         // METEOR satellites → Lrpt (epic #469 task 7). Both
         // METEOR-M 2 and METEOR-M2 3 ship with Some(Lrpt) once
         // the live LRPT viewer + decoder driver are wired.

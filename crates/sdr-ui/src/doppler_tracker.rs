@@ -265,27 +265,53 @@ impl DopplerTracker {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use sdr_sat::KNOWN_SATELLITES;
+
+    // Synthetic test fixtures. Doppler-tracker logic is satellite-
+    // agnostic (it picks among `Candidate` slices by elevation /
+    // master switch / freq tolerance — none of which depend on
+    // the real catalog). Using fabricated `KnownSatellite`
+    // instances keeps the tests stable across catalog churn —
+    // before the August 2025 NOAA POES decommissioning these
+    // fixtures pulled `NOAA 15 / 18 / 19` out of the live catalog,
+    // which broke when the real entries were removed. The
+    // fabricated instances below are kept on the historical
+    // 137 MHz frequencies so the test scenarios still read
+    // intuitively (overlap, distinct, etc.).
+    static FIXTURE_A: KnownSatellite = KnownSatellite {
+        name: "TEST_SAT_A",
+        norad_id: 1,
+        downlink_hz: 137_620_000,
+        demod_mode: sdr_types::DemodMode::Nfm,
+        bandwidth_hz: 38_000,
+        imaging_protocol: Some(sdr_sat::ImagingProtocol::Apt),
+    };
+    static FIXTURE_B: KnownSatellite = KnownSatellite {
+        name: "TEST_SAT_B",
+        norad_id: 2,
+        downlink_hz: 137_912_500,
+        demod_mode: sdr_types::DemodMode::Nfm,
+        bandwidth_hz: 38_000,
+        imaging_protocol: Some(sdr_sat::ImagingProtocol::Apt),
+    };
+    static FIXTURE_C: KnownSatellite = KnownSatellite {
+        name: "TEST_SAT_C",
+        norad_id: 3,
+        downlink_hz: 137_100_000,
+        demod_mode: sdr_types::DemodMode::Nfm,
+        bandwidth_hz: 38_000,
+        imaging_protocol: Some(sdr_sat::ImagingProtocol::Apt),
+    };
 
     fn noaa_15() -> &'static KnownSatellite {
-        KNOWN_SATELLITES
-            .iter()
-            .find(|s| s.name == "NOAA 15")
-            .expect("NOAA 15 in catalog")
+        &FIXTURE_A
     }
 
     fn noaa_18() -> &'static KnownSatellite {
-        KNOWN_SATELLITES
-            .iter()
-            .find(|s| s.name == "NOAA 18")
-            .expect("NOAA 18 in catalog")
+        &FIXTURE_B
     }
 
     fn noaa_19() -> &'static KnownSatellite {
-        KNOWN_SATELLITES
-            .iter()
-            .find(|s| s.name == "NOAA 19")
-            .expect("NOAA 19 in catalog")
+        &FIXTURE_C
     }
 
     #[test]
@@ -329,7 +355,7 @@ mod tests {
             elevation_deg: 12.5,
         }];
         let pick = pick_active_satellite(true, &candidates).expect("some pick");
-        assert_eq!(pick.name, "NOAA 15");
+        assert_eq!(pick.name, "TEST_SAT_A");
     }
 
     #[test]
@@ -368,7 +394,7 @@ mod tests {
             },
         ];
         let pick = pick_active_satellite(true, &candidates).expect("some pick");
-        assert_eq!(pick.name, "NOAA 19");
+        assert_eq!(pick.name, "TEST_SAT_C");
     }
 
     #[test]
@@ -388,7 +414,7 @@ mod tests {
             },
         ];
         let pick = pick_active_satellite(true, &candidates).expect("some pick");
-        assert_eq!(pick.name, "NOAA 18");
+        assert_eq!(pick.name, "TEST_SAT_B");
     }
 
     #[test]
@@ -404,7 +430,7 @@ mod tests {
             },
         ];
         let pick = pick_active_satellite(true, &candidates).expect("some pick");
-        assert_eq!(pick.name, "NOAA 19");
+        assert_eq!(pick.name, "TEST_SAT_C");
     }
 
     // A TLE for NOAA 19 captured 2026-04-26 (epoch 26116.59 ≈
@@ -596,7 +622,7 @@ mod tests {
     fn set_master_disabled_clears_active_satellite() {
         let mut t = DopplerTracker::new(true);
         let _ = t.set_active(Some(noaa_15()));
-        assert_eq!(t.active().map(|s| s.name), Some("NOAA 15"));
+        assert_eq!(t.active().map(|s| s.name), Some("TEST_SAT_A"));
         let final_offset = t.set_master_enabled(false);
         assert!(t.active().is_none());
         // Returns Some on disable transition. Per CR round 1
