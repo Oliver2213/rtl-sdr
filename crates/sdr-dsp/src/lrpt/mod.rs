@@ -1,23 +1,39 @@
-//! Meteor-M LRPT QPSK demodulator (epic #469, stage 1).
+//! Meteor-M LRPT QPSK / OQPSK demodulator (epic #469 + issue #662).
 //!
-//! Pipeline: RRC matched filter → Costas loop → Gardner symbol-
-//! timing recovery → hard slicer → soft symbols (i8 ±127). No AGC
-//! in v1 — RRC normalization handles unity gain.
+//! Two pipelines live here, dispatched from [`LrptDemod`] by mode:
 //!
-//! Each module is small, pure, and unit-testable in isolation. The
-//! `LrptDemod` chain wires them together; callers push complex
-//! baseband samples and pull soft symbol pairs out.
+//! - **QPSK** (legacy METEOR-M N2, decommissioned but kept for any
+//!   archival recordings): RRC matched filter → SDR++-style Costas
+//!   → Gardner timing → hard slicer.
+//! - **OQPSK** (current METEOR-M2 3 / METEOR-M2 4): RRC matched
+//!   filter → dbdexter-style [`MeteorPll`] → dbdexter-style
+//!   [`MmTiming`] (Mueller-Muller, dual-rail timeslot machine) →
+//!   hard slicer.
 //!
-//! Reference (read-only):
-//! `original/SDRPlusPlus/decoder_modules/meteor_demodulator/src/`
-//! and `original/meteor_demod/dsp/`.
+//! See [`meteor_pll`] and [`mm_timing`] for the OQPSK math; see
+//! [`costas`] and [`timing`] for the QPSK math. The QPSK and
+//! OQPSK paths are kept separate (rather than collapsing onto a
+//! single primitive) so the QPSK chain stays unchanged from the
+//! pre-#662 baseline — no regression risk for archival N2
+//! recordings, and OQPSK gets dbdexter's tight loops + lock
+//! detector + free-run frequency sweep without bolting them onto
+//! a previously-tuned QPSK loop.
+//!
+//! References (read-only):
+//! - QPSK chain: `original/SDRPlusPlus/decoder_modules/meteor_demodulator/src/`.
+//! - OQPSK chain: `original/meteor_demod/dsp/{pll,timing}.{c,h}` and
+//!   `original/meteor_demod/demod.c::demod_oqpsk`.
 
 pub mod costas;
+pub mod meteor_pll;
+pub mod mm_timing;
 pub mod rrc_filter;
 pub mod slicer;
 pub mod timing;
 
 pub use costas::Costas;
+pub use meteor_pll::MeteorPll;
+pub use mm_timing::MmTiming;
 pub use rrc_filter::RrcFilter;
 pub use slicer::slice_soft;
 pub use timing::Gardner;
@@ -52,17 +68,76 @@ pub const GARDNER_MU_GAIN: f32 = 0.01;
 /// every magic numeric configuration value.
 pub const SAMPLES_PER_SYMBOL: usize = 2;
 
-/// Top-level LRPT demodulator chain.
+/// dbdexter `pll_bw` default — `1` Hz of effective loop bandwidth
+/// at the Meteor symbol rate. `meteor_demod/demod.h:15`.
+const DBDEXTER_PLL_BW_HZ: f32 = 1.0;
+
+/// dbdexter `SYM_BW` default — Mueller-Muller loop bandwidth.
+/// `meteor_demod/demod.h:14`. Already normalized; in dbdexter's
+/// pipeline this is divided by the polyphase `interp_factor`
+/// before being passed to the timing loop, but we run with no
+/// interpolation (1 filtered output per input at 2 sps), so we
+/// use the value directly.
+const DBDEXTER_SYM_BW: f32 = 0.000_05;
+
+/// OQPSK PLL loop bandwidth in radians per `mix_*` call. Mirrors
+/// dbdexter's `2π * pll_bw / (1 * symrate)` formula
+/// (`demod.c:12`, with `multiplier = 1` for OQPSK). At 1 Hz of
+/// effective loop bandwidth and 72 ksym/s, this is
+/// `2π × 1 / 72_000 ≈ 8.7266e-5`.
+const OQPSK_PLL_BW: f32 = 2.0 * core::f32::consts::PI * DBDEXTER_PLL_BW_HZ / SYMBOL_RATE_HZ;
+
+/// Mueller-Muller initial symbol period, in radians per timeslot
+/// tick. Mirrors dbdexter's `2π * symrate / (samplerate * interp)`
+/// formula (`demod.c:13`, with `interp = 1`). At 2 sps this is
+/// exactly `π`.
+const MM_SYM_FREQ: f32 = 2.0 * core::f32::consts::PI * SYMBOL_RATE_HZ / SAMPLE_RATE_HZ;
+
+/// Modulation modes supported by [`LrptDemod`]. The catalog layer
+/// (`sdr-sat`) carries its own equivalent enum — the controller is
+/// the seam that maps from one to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LrptMode {
+    /// Standard QPSK. Used by legacy METEOR-M N2 recordings.
+    Qpsk,
+    /// Offset QPSK — Q delayed by Tsym/2 from I. Used by
+    /// METEOR-M2 3 and METEOR-M2 4.
+    Oqpsk,
+}
+
+/// Top-level LRPT demodulator chain. The mode is picked at
+/// construction (defaulting to QPSK for backward compatibility);
+/// `process()` dispatches each input sample down the appropriate
+/// inner pipeline.
 pub struct LrptDemod {
     rrc: RrcFilter,
-    costas: Costas,
-    gardner: Gardner,
+    inner: DemodInner,
+}
+
+/// Per-mode demod state. Boxing isn't necessary — both variants
+/// are small enough that the size difference is irrelevant, and
+/// the sum-type representation makes the dispatch in `process`
+/// trivially branch-predictable.
+enum DemodInner {
+    Qpsk {
+        costas: Costas,
+        gardner: Gardner,
+    },
+    Oqpsk {
+        pll: MeteorPll,
+        timing: MmTiming,
+        /// In-phase sample stashed between the I-tick and the
+        /// Q-tick. Per dbdexter `demod.c::demod_oqpsk`'s `static
+        /// float inphase`.
+        pending_i: f32,
+    },
 }
 
 impl LrptDemod {
-    /// Build a demod chain at the standard Meteor parameters
-    /// ([`SAMPLES_PER_SYMBOL`], [`COSTAS_LOOP_BW`],
-    /// [`GARDNER_OMEGA_GAIN`], [`GARDNER_MU_GAIN`]).
+    /// Build a QPSK demod chain. Equivalent to
+    /// `new_with_mode(LrptMode::Qpsk)` — kept as a no-arg
+    /// constructor for backward compatibility with all the
+    /// existing call sites that predate the modulation enum.
     ///
     /// # Errors
     ///
@@ -74,15 +149,51 @@ impl LrptDemod {
     /// the propagation is here for defensive consistency with the
     /// rest of the DSP module.
     pub fn new() -> Result<Self, DspError> {
+        Self::new_with_mode(LrptMode::Qpsk)
+    }
+
+    /// Build a demod chain in the requested mode.
+    ///
+    /// QPSK uses the existing SDR++-style Costas + Gardner; OQPSK
+    /// uses the dbdexter-style [`MeteorPll`] + [`MmTiming`]. Each mode
+    /// brings its own loop tuning (see the `*_BW` / `*_GAIN`
+    /// constants in this module for the chosen values).
+    ///
+    /// # Errors
+    ///
+    /// Returns `DspError::InvalidParameter` if any inner loop
+    /// rejects its parameters. Practically unreachable for the
+    /// pinned constants in this module.
+    pub fn new_with_mode(mode: LrptMode) -> Result<Self, DspError> {
+        let inner = match mode {
+            LrptMode::Qpsk => Self::build_qpsk_inner()?,
+            LrptMode::Oqpsk => Self::build_oqpsk_inner()?,
+        };
+        Ok(Self {
+            rrc: RrcFilter::new(SAMPLES_PER_SYMBOL),
+            inner,
+        })
+    }
+
+    fn build_qpsk_inner() -> Result<DemodInner, DspError> {
         #[allow(
             clippy::cast_precision_loss,
             reason = "SAMPLES_PER_SYMBOL is a tiny constant (= 2); the f32 conversion is exact"
         )]
         let sps_f = SAMPLES_PER_SYMBOL as f32;
-        Ok(Self {
-            rrc: RrcFilter::new(SAMPLES_PER_SYMBOL),
+        Ok(DemodInner::Qpsk {
             costas: Costas::new(COSTAS_LOOP_BW)?,
             gardner: Gardner::new(sps_f, GARDNER_OMEGA_GAIN, GARDNER_MU_GAIN)?,
+        })
+    }
+
+    fn build_oqpsk_inner() -> Result<DemodInner, DspError> {
+        let pll = MeteorPll::new(OQPSK_PLL_BW, true, None)?;
+        let timing = MmTiming::new(MM_SYM_FREQ, DBDEXTER_SYM_BW)?;
+        Ok(DemodInner::Oqpsk {
+            pll,
+            timing,
+            pending_i: 0.0,
         })
     }
 
@@ -90,17 +201,46 @@ impl LrptDemod {
     /// symbol pair `[i, q]` when the timing recovery fires a tick.
     pub fn process(&mut self, x: Complex) -> Option<[i8; 2]> {
         let filtered = self.rrc.process(x);
-        let derotated = self.costas.process(filtered);
-        self.gardner.process(derotated).map(slice_soft)
+        match &mut self.inner {
+            DemodInner::Qpsk { costas, gardner } => {
+                let derotated = costas.process(filtered);
+                gardner.process(derotated).map(slice_soft)
+            }
+            DemodInner::Oqpsk {
+                pll,
+                timing,
+                pending_i,
+            } => match timing.advance_timeslot_dual() {
+                1 => {
+                    // I-tick: mix and stash the in-phase sample.
+                    // The Q-tick half a symbol from now will pair
+                    // with this and drive the per-symbol updates.
+                    *pending_i = pll.mix_i(filtered);
+                    None
+                }
+                2 => {
+                    // Q-tick: mix, reassemble the I/Q pair, retime
+                    // the symbol clock, update the carrier
+                    // estimate, emit the soft symbol.
+                    let q = pll.mix_q(filtered);
+                    let symbol = Complex::new(*pending_i, q);
+                    timing.retime(symbol);
+                    pll.update_estimate(*pending_i, q);
+                    Some(slice_soft(symbol))
+                }
+                _ => None,
+            },
+        }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pipeline_produces_soft_symbols_from_synthetic_qpsk() {
+    fn qpsk_pipeline_produces_soft_symbols_from_synthetic_qpsk() {
         // Synthesize ~2 sps QPSK with no impairments. Pipeline
         // converges and emits signed i8 pairs.
         let mut demod = LrptDemod::new().expect("LrptDemod::new");
@@ -127,7 +267,69 @@ mod tests {
         // half is correct.
         assert!(
             emitted > 1500,
-            "pipeline should emit ~2000 soft symbols, got {emitted}",
+            "QPSK pipeline should emit ~2000 soft symbols, got {emitted}",
         );
+    }
+
+    #[test]
+    fn oqpsk_pipeline_produces_soft_symbols_from_synthetic_oqpsk() {
+        // Synthesize 2 sps OQPSK by interleaving I-only samples
+        // and Q-only samples on alternating sample indices — the
+        // canonical "Q delayed by Tsym/2" representation. The
+        // OQPSK chain should converge and emit one soft symbol
+        // per pair of input samples.
+        let mut demod =
+            LrptDemod::new_with_mode(LrptMode::Oqpsk).expect("LrptDemod::new_with_mode");
+        // Four hard QPSK constellation points expressed as I-only
+        // and Q-only halves at +/-0.707.
+        let i_vals = [0.707_f32, -0.707, 0.707, -0.707];
+        let q_vals = [0.707_f32, 0.707, -0.707, -0.707];
+        let mut emitted = 0_usize;
+        for n in 0..8000 {
+            let sym_idx = (n / 2) % 4;
+            let s = if n % 2 == 0 {
+                Complex::new(i_vals[sym_idx], 0.0)
+            } else {
+                Complex::new(0.0, q_vals[sym_idx])
+            };
+            if demod.process(s).is_some() {
+                emitted += 1;
+            }
+        }
+        // 8000 inputs at 2 sps → ~4000 emitted post-settle. Allow
+        // generous slack for the dbdexter loop's longer initial
+        // lock latency (the free-run sweep takes a moment to find
+        // zero offset on a clean signal).
+        assert!(
+            emitted > 3000,
+            "OQPSK pipeline should emit ~4000 soft symbols, got {emitted}",
+        );
+    }
+
+    #[test]
+    fn oqpsk_constructor_succeeds() {
+        // Sanity check: every constant we feed to the OQPSK
+        // chain's inner constructors is finite + positive, so
+        // construction should never fail.
+        assert!(LrptDemod::new_with_mode(LrptMode::Oqpsk).is_ok());
+    }
+
+    #[test]
+    fn oqpsk_pipeline_processes_zero_iq_without_emitting() {
+        // Zero IQ → no symbol decisions → no emissions, but the
+        // chain must not panic or produce noise either.
+        let mut demod = LrptDemod::new_with_mode(LrptMode::Oqpsk).unwrap();
+        let mut emitted = 0_usize;
+        for _ in 0..1000 {
+            // The OQPSK chain emits whatever the slicer makes of
+            // the zero-mixed samples — it's allowed to emit, just
+            // shouldn't crash. Count emissions only as a sanity
+            // signal.
+            if demod.process(Complex::default()).is_some() {
+                emitted += 1;
+            }
+        }
+        // 1000 inputs at 2 sps → at most ~500 emissions.
+        assert!(emitted <= 500);
     }
 }

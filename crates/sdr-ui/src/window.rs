@@ -11538,6 +11538,28 @@ fn connect_satellites_panel(
                         // be at the wrong rate and the demod's
                         // resampler would sit at the wrong
                         // setpoint. Per epic #469 task 7.
+
+                        // Tell the DSP thread which Meteor
+                        // modulation to use for this pass —
+                        // METEOR-M N2 was QPSK; the active
+                        // METEOR-M2 3 / M2-4 are OQPSK. Sent
+                        // BEFORE `open_lrpt_viewer_if_needed`
+                        // (which triggers lazy decoder init)
+                        // so the freshly-built decoder uses
+                        // the right inner chain. Per #662.
+                        if let Some(modulation) = sdr_sat::KNOWN_SATELLITES
+                            .iter()
+                            .find(|s| s.norad_id == norad_id)
+                            .and_then(|s| s.lrpt_modulation)
+                        {
+                            let dsp_mode = match modulation {
+                                sdr_sat::LrptModulation::Qpsk => sdr_dsp::lrpt::LrptMode::Qpsk,
+                                sdr_sat::LrptModulation::Oqpsk => sdr_dsp::lrpt::LrptMode::Oqpsk,
+                            };
+                            state_a
+                                .send_dsp(sdr_core::messages::UiToDsp::SetLrptModulation(dsp_mode));
+                        }
+
                         crate::lrpt_viewer::open_lrpt_viewer_if_needed(
                             &parent_provider_a,
                             &state_a,

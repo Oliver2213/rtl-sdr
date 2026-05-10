@@ -610,6 +610,16 @@ struct DspState {
     /// log at the IQ block rate (~100 Hz) until source-stop.
     /// Per `CodeRabbit` round 12 on PR #543.
     lrpt_init_failed: bool,
+    /// Modulation the LRPT decoder should be built with on the
+    /// next lazy-init. Set by `UiToDsp::SetLrptModulation` from
+    /// the wiring layer (which knows the current satellite from
+    /// the `KnownSatellite` catalog). Defaults to OQPSK because
+    /// every active Meteor satellite (M2-3, M2-4) transmits
+    /// OQPSK — manual LRPT-mode use without a satellite-aware
+    /// caller still works for current Meteors. A change here
+    /// drops the existing decoder so the next IQ chunk re-inits
+    /// at the new modulation. Per #662.
+    lrpt_modulation: sdr_dsp::lrpt::LrptMode,
     /// ISS SSTV decoder. Lazy-init on first `sstv_decode_tap` call
     /// at the `RadioModule`'s current audio sample rate (typically
     /// 48 kHz). The decoder internally resamples to `11_025` Hz, so
@@ -785,6 +795,7 @@ impl DspState {
             lrpt_decoder: None,
             lrpt_image: None,
             lrpt_init_failed: false,
+            lrpt_modulation: sdr_dsp::lrpt::LrptMode::Oqpsk,
             sstv_decoder: None,
             sstv_mono_buf: Vec::new(),
             sstv_init_failed_at_rate: None,
@@ -901,6 +912,7 @@ fn lrpt_decode_tap(
     image: Option<&sdr_radio::lrpt_image::LrptImage>,
     radio_input: &[Complex],
     init_failed: &mut bool,
+    modulation: sdr_dsp::lrpt::LrptMode,
 ) {
     let Some(image) = image else {
         return;
@@ -914,10 +926,10 @@ fn lrpt_decode_tap(
         return;
     }
     if decoder_slot.is_none() {
-        match LrptDecoder::new(image.clone()) {
+        match LrptDecoder::new(image.clone(), modulation) {
             Ok(decoder) => {
                 tracing::info!(
-                    "LRPT decoder initialised at {} Hz IF rate",
+                    "LRPT decoder initialised at {} Hz IF rate, modulation = {modulation:?}",
                     sdr_dsp::lrpt::SAMPLE_RATE_HZ
                 );
                 *decoder_slot = Some(decoder);
@@ -2560,6 +2572,20 @@ fn handle_command(state: &mut DspState, dsp_tx: &mpsc::Sender<DspToUi>, cmd: UiT
             // same contract `ClearLrptImage` codifies (round 1).
         }
 
+        UiToDsp::SetLrptModulation(mode) => {
+            tracing::info!("LRPT modulation set to {mode:?}");
+            // Drop the existing decoder iff the modulation
+            // actually changed — re-init lazily on the next IQ
+            // chunk against the new mode. A no-op repeat (auto-
+            // record re-sending the same modulation across
+            // overlapping passes) won't cost a Viterbi reset.
+            if state.lrpt_modulation != mode {
+                state.lrpt_modulation = mode;
+                state.lrpt_decoder = None;
+                state.lrpt_init_failed = false;
+            }
+        }
+
         UiToDsp::ClearLrptImage => {
             tracing::info!("LRPT image handle cleared — decoder tap is silent");
             state.lrpt_image = None;
@@ -4060,6 +4086,7 @@ fn process_iq_block(
                         state.lrpt_image.as_ref(),
                         radio_input,
                         &mut state.lrpt_init_failed,
+                        state.lrpt_modulation,
                     );
                 }
 

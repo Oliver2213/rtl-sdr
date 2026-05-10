@@ -214,6 +214,37 @@ pub const METEOR_M2_4_EXPECTED_LRPT_APIDS: &[u16] = &[64, 65, 68];
 /// their own decoder + viewer without the recorder itself caring
 /// about protocol details.
 ///
+/// LRPT modulation variant used by a Meteor-M satellite. Per #662,
+/// the original METEOR-M N2 (NORAD 40069, decommissioned) used
+/// standard QPSK; current generation METEOR-M2 satellites
+/// (M2-2, M2-3, M2-4) all use **Offset QPSK** (OQPSK) at 72 ksym/s.
+///
+/// The two variants share the same constellation (4 corner points)
+/// but differ in symbol timing: OQPSK delays Q by half a symbol
+/// period relative to I. A pure QPSK demod CAN lock on OQPSK but
+/// produces sub-quality soft symbols because the Gardner timing
+/// recovery error metric assumes I and Q are co-timed. That's the
+/// root cause of the silent-Meteor-pass debug session that
+/// surfaced this issue.
+///
+/// Carried on each [`KnownSatellite`] with `imaging_protocol =
+/// Some(Lrpt)` so the demod chain can dispatch correctly per
+/// satellite. `None` for non-LRPT satellites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LrptModulation {
+    /// Standard QPSK at 72 ksym/s. Used by the original METEOR-M
+    /// N2 (now decommissioned). Kept as a variant so a future
+    /// satellite reverting to standard QPSK can be enrolled
+    /// without code changes.
+    Qpsk,
+    /// Offset QPSK at 72 ksym/s. Used by all current operational
+    /// METEOR-M2 satellites (M2-3, M2-4). Q is delayed by half a
+    /// symbol period; demodulator must use dual-tick timing
+    /// recovery and separate I/Q PLL mixes per
+    /// `original/meteor_demod/dsp/pll.c`.
+    Oqpsk,
+}
+
 /// `None` on a [`KnownSatellite::imaging_protocol`] means "in the
 /// catalog for pass-prediction display purposes, but auto-record
 /// is not yet wired for this satellite's protocol." The recorder's
@@ -329,6 +360,16 @@ pub struct KnownSatellite {
     /// produces a per-channel PNG regardless of whether it's in this
     /// set. The set drives diagnostics only.
     pub expected_lrpt_apids: Option<&'static [u16]>,
+    /// LRPT modulation variant for this satellite. `None` for
+    /// non-LRPT entries. `Some(LrptModulation::Oqpsk)` for current-
+    /// generation Meteor-M2 satellites (M2-3, M2-4) which transmit
+    /// Offset QPSK; `Some(Qpsk)` reserved for any future revival
+    /// of the original METEOR-M N2 (which used standard QPSK).
+    /// Drives the dispatch in `sdr_dsp::lrpt::LrptDemod` so the
+    /// timing recovery + PLL paths match the actual signal. Per
+    /// #662 — investigation showed our hardcoded-QPSK pipeline
+    /// can't cleanly demodulate OQPSK signals.
+    pub lrpt_modulation: Option<LrptModulation>,
 }
 
 impl KnownSatellite {
@@ -426,6 +467,9 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         // composites are unavailable until Roscosmos schedules
         // M2-3 back to standard mode. Per #645.
         expected_lrpt_apids: Some(METEOR_M2_3_EXPECTED_LRPT_APIDS),
+        // Current-generation METEOR-M2 satellites broadcast
+        // Offset QPSK at 72 ksym/s. Per #662.
+        lrpt_modulation: Some(LrptModulation::Oqpsk),
     },
     KnownSatellite {
         // METEOR-M2 4 launched in 2024 and is actively transmitting
@@ -453,6 +497,8 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         // passes — currently the easier first-decode target than
         // M2-3 for exactly that reason. Per #645.
         expected_lrpt_apids: Some(METEOR_M2_4_EXPECTED_LRPT_APIDS),
+        // Same OQPSK modulation as M2-3. Per #662.
+        lrpt_modulation: Some(LrptModulation::Oqpsk),
     },
     // ISS SSTV — epic #472. Currently 437.550 MHz UHF (ARISS Series
     // 31+, April 2026 onward, see #638); the catalog tracks the live
@@ -480,6 +526,7 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         // LRPT broadcast — the per-pass expected-APID set doesn't
         // apply.
         expected_lrpt_apids: None,
+        lrpt_modulation: None,
     },
     // Amateur-radio voice satellites — #649. Pure pass-prediction
     // entries: the user manually tunes / listens via the existing
@@ -518,6 +565,7 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         bandwidth_hz: HAM_SSB_BANDWIDTH_HZ,
         imaging_protocol: None,
         expected_lrpt_apids: None,
+        lrpt_modulation: None,
     },
     KnownSatellite {
         // SaudiSat-1C (SO-50). Single-channel FM voice repeater:
@@ -532,6 +580,7 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         bandwidth_hz: HAM_VOICE_NFM_BANDWIDTH_HZ,
         imaging_protocol: None,
         expected_lrpt_apids: None,
+        lrpt_modulation: None,
     },
     KnownSatellite {
         // PO-101 (Diwata-2 / Philippines). FM voice repeater +
@@ -549,6 +598,7 @@ pub const KNOWN_SATELLITES: &[KnownSatellite] = &[
         bandwidth_hz: HAM_VOICE_NFM_BANDWIDTH_HZ,
         imaging_protocol: None,
         expected_lrpt_apids: None,
+        lrpt_modulation: None,
     },
 ];
 

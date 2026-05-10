@@ -32,7 +32,7 @@
 
 use std::collections::HashMap;
 
-use sdr_dsp::lrpt::LrptDemod;
+use sdr_dsp::lrpt::{LrptDemod, LrptMode};
 use sdr_lrpt::LrptPipeline;
 use sdr_lrpt::image::IMAGE_WIDTH;
 use sdr_types::{Complex, DspError};
@@ -44,6 +44,11 @@ pub struct LrptDecoder {
     demod: LrptDemod,
     pipeline: LrptPipeline,
     image: LrptImage,
+    /// Modulation the decoder was built for. Stored so
+    /// [`Self::reset`] can re-construct the inner demod chain in
+    /// the same mode without the caller having to plumb the
+    /// modulation through a second time.
+    mode: LrptMode,
     /// Per-APID watermark — the last `channel.lines` count we
     /// pushed into the shared `LrptImage`. Indexed by APID
     /// (16-bit) since that's the identifier the demux stamps
@@ -54,18 +59,22 @@ pub struct LrptDecoder {
 }
 
 impl LrptDecoder {
-    /// Build a fresh decoder around the given shared image.
+    /// Build a fresh decoder around the given shared image and
+    /// modulation. METEOR-M N2 is QPSK; METEOR-M2 3 / METEOR-M2 4
+    /// are OQPSK — the mode picks which inner demod chain runs
+    /// (per [`LrptDemod::new_with_mode`]).
     ///
     /// # Errors
     ///
     /// Returns `DspError::InvalidParameter` if the underlying
     /// [`LrptDemod`] constructor rejects its parameters
     /// (practically unreachable — see that constructor's docs).
-    pub fn new(image: LrptImage) -> Result<Self, DspError> {
+    pub fn new(image: LrptImage, mode: LrptMode) -> Result<Self, DspError> {
         Ok(Self {
-            demod: LrptDemod::new()?,
+            demod: LrptDemod::new_with_mode(mode)?,
             pipeline: LrptPipeline::new(),
             image,
+            mode,
             last_pushed_lines: HashMap::new(),
         })
     }
@@ -142,7 +151,7 @@ impl LrptDecoder {
     /// Returns `DspError` if the demod re-construction fails
     /// (see [`LrptDemod::new`]).
     pub fn reset(&mut self) -> Result<(), DspError> {
-        self.demod = LrptDemod::new()?;
+        self.demod = LrptDemod::new_with_mode(self.mode)?;
         self.pipeline.reset();
         self.image.clear();
         self.last_pushed_lines.clear();
@@ -164,7 +173,7 @@ mod tests {
     #[test]
     fn lrpt_decoder_constructible() {
         let image = LrptImage::new();
-        let _decoder = LrptDecoder::new(image).expect("LrptDemod must construct");
+        let _decoder = LrptDecoder::new(image, LrptMode::Qpsk).expect("LrptDemod must construct");
     }
 
     #[test]
@@ -173,7 +182,7 @@ mod tests {
         // image lines. The decoder should run cleanly and the
         // shared image should stay empty.
         let image = LrptImage::new();
-        let mut decoder = LrptDecoder::new(image.clone()).unwrap();
+        let mut decoder = LrptDecoder::new(image.clone(), LrptMode::Qpsk).unwrap();
         let zeros = vec![Complex::default(); 1_000];
         decoder.process(&zeros);
         assert!(image.snapshot_channel(APID_TEST).is_none());
@@ -197,7 +206,7 @@ mod tests {
         // an empty pipeline harvests nothing on the first
         // call.
         let image = LrptImage::new();
-        let mut decoder = LrptDecoder::new(image.clone()).unwrap();
+        let mut decoder = LrptDecoder::new(image.clone(), LrptMode::Qpsk).unwrap();
         // Empty pipeline → empty assembler → harvest is a no-op.
         decoder.harvest_new_lines();
         assert!(decoder.last_pushed_lines.is_empty());
@@ -211,7 +220,7 @@ mod tests {
         let image = LrptImage::new();
         image.push_line(APID_TEST, &vec![42_u8; IMAGE_WIDTH]);
         assert!(image.snapshot_channel(APID_TEST).is_some());
-        let mut decoder = LrptDecoder::new(image.clone()).unwrap();
+        let mut decoder = LrptDecoder::new(image.clone(), LrptMode::Qpsk).unwrap();
         decoder.last_pushed_lines.insert(APID_TEST, 7);
         decoder.reset().expect("reset must succeed");
         assert!(decoder.last_pushed_lines.is_empty());
