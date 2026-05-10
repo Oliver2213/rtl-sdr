@@ -124,11 +124,23 @@ impl MeteorPll {
     /// # Errors
     ///
     /// Returns `DspError::InvalidParameter` if `bandwidth` is not
-    /// finite or not positive.
+    /// finite or not positive, or if `freq_max` is `Some(value)`
+    /// with a non-finite `value` (NaN / ±∞ would propagate
+    /// silently into `fmax`, then through the unlocked-state
+    /// frequency sweep and `clamp` calls — every comparison
+    /// against NaN evaluates `false`, so the loop would corrupt
+    /// silently rather than fail loudly).
     pub fn new(bandwidth: f32, oqpsk: bool, freq_max: Option<f32>) -> Result<Self, DspError> {
         if !bandwidth.is_finite() || bandwidth <= 0.0 {
             return Err(DspError::InvalidParameter(format!(
                 "bandwidth must be finite and positive, got {bandwidth}"
+            )));
+        }
+        if let Some(fm) = freq_max
+            && !fm.is_finite()
+        {
+            return Err(DspError::InvalidParameter(format!(
+                "freq_max must be finite when provided, got {fm}"
             )));
         }
         // dbdexter (`pll.c:30`): negative `freq_max` selects the
@@ -330,6 +342,18 @@ mod tests {
         assert!(MeteorPll::new(-0.1, false, None).is_err());
         assert!(MeteorPll::new(f32::NAN, false, None).is_err());
         assert!(MeteorPll::new(f32::INFINITY, false, None).is_err());
+    }
+
+    #[test]
+    fn rejects_non_finite_freq_max() {
+        // Per CR round 1 on PR #663 — without this guard,
+        // `Some(NaN)` slipped past the negative-or-clamp branch
+        // and poisoned `fmax`, silently breaking the unlocked-
+        // state frequency sweep (every `>= fmax` and `<= -fmax`
+        // comparison against NaN returns `false`).
+        assert!(MeteorPll::new(TEST_BW, false, Some(f32::NAN)).is_err());
+        assert!(MeteorPll::new(TEST_BW, false, Some(f32::INFINITY)).is_err());
+        assert!(MeteorPll::new(TEST_BW, true, Some(f32::NEG_INFINITY)).is_err());
     }
 
     #[test]

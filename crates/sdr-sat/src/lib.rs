@@ -730,6 +730,68 @@ mod tests {
     }
 
     #[test]
+    fn lrpt_modulation_pinned_for_active_meteor_satellites() {
+        // `lrpt_modulation` is part of the runtime demod-selection
+        // contract (sdr-dsp::lrpt::LrptDemod dispatches QPSK vs
+        // OQPSK pipelines on it). A future copy/paste that left
+        // a Meteor row at `None` would silently fall back to the
+        // legacy QPSK path and resurrect the zero-APID pass-failure
+        // that motivated #662 in the first place — so pin both
+        // active Meteor entries here. Per CR round 1 on PR #663.
+        let m2_3 = KNOWN_SATELLITES
+            .iter()
+            .find(|s| s.norad_id == METEOR_M2_3_NORAD_ID)
+            .expect("METEOR-M2 3 should be in KNOWN_SATELLITES");
+        assert_eq!(
+            m2_3.lrpt_modulation,
+            Some(LrptModulation::Oqpsk),
+            "METEOR-M2 3 transmits OQPSK; QPSK demod cannot decode it cleanly",
+        );
+        let m2_4 = KNOWN_SATELLITES
+            .iter()
+            .find(|s| s.norad_id == METEOR_M2_4_NORAD_ID)
+            .expect("METEOR-M2 4 should be in KNOWN_SATELLITES");
+        assert_eq!(
+            m2_4.lrpt_modulation,
+            Some(LrptModulation::Oqpsk),
+            "METEOR-M2 4 transmits OQPSK; QPSK demod cannot decode it cleanly",
+        );
+    }
+
+    #[test]
+    fn lrpt_modulation_only_set_on_lrpt_entries() {
+        // Inverse of the test above: the catalog is small enough
+        // that a stray `Some(_)` on a non-LRPT row would slip
+        // through review without this guard. Anything not flagged
+        // `imaging_protocol = Some(Lrpt)` must have
+        // `lrpt_modulation = None` — otherwise the field
+        // contradicts the rest of the row's contract. Per CR
+        // round 1 on PR #663.
+        for sat in KNOWN_SATELLITES {
+            let is_lrpt = sat.imaging_protocol == Some(ImagingProtocol::Lrpt);
+            if is_lrpt {
+                assert!(
+                    sat.lrpt_modulation.is_some(),
+                    "{} (NORAD {}) is an LRPT satellite but lrpt_modulation = None — \
+                     the demod chain would fall back to legacy QPSK and likely fail to decode",
+                    sat.name,
+                    sat.norad_id,
+                );
+            } else {
+                assert!(
+                    sat.lrpt_modulation.is_none(),
+                    "{} (NORAD {}) is not LRPT but carries lrpt_modulation = {:?} — \
+                     contradicts imaging_protocol = {:?}",
+                    sat.name,
+                    sat.norad_id,
+                    sat.lrpt_modulation,
+                    sat.imaging_protocol,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn meteor_m2_4_carries_standard_mode_expected_apids() {
         // M2-4 broadcasts c1/c2/c4 (visual + visual + thermal IR) —
         // the standard set every composite recipe in

@@ -210,26 +210,41 @@ impl LrptDemod {
                 pll,
                 timing,
                 pending_i,
-            } => match timing.advance_timeslot_dual() {
-                1 => {
-                    // I-tick: mix and stash the in-phase sample.
-                    // The Q-tick half a symbol from now will pair
-                    // with this and drive the per-symbol updates.
-                    *pending_i = pll.mix_i(filtered);
-                    None
+            } => {
+                // Advance the carrier NCO on every input sample,
+                // not only on timing ticks. dbdexter's polyphase
+                // pipeline (interp_factor=5) skips the PLL on
+                // non-tick polyphase positions because those are
+                // filter intermediates, not real samples — but at
+                // our 2 sps with no interpolation, every input is
+                // a real sample and the NCO must track wall-clock
+                // continuously. Without this, a 0-tick from the
+                // M&M loop during timing correction leaves the
+                // PLL frozen for that sample, and the next
+                // mix_i / mix_q would run at the wrong phase.
+                // Per CR round 1 on PR #663.
+                let mixed = pll.mix(filtered);
+                match timing.advance_timeslot_dual() {
+                    1 => {
+                        // I-tick: stash the in-phase rail. The
+                        // Q-tick half a symbol from now will
+                        // pair with this and drive the per-symbol
+                        // updates.
+                        *pending_i = mixed.re;
+                        None
+                    }
+                    2 => {
+                        // Q-tick: reassemble the I/Q pair,
+                        // retime the symbol clock, update the
+                        // carrier estimate, emit the soft symbol.
+                        let symbol = Complex::new(*pending_i, mixed.im);
+                        timing.retime(symbol);
+                        pll.update_estimate(*pending_i, mixed.im);
+                        Some(slice_soft(symbol))
+                    }
+                    _ => None,
                 }
-                2 => {
-                    // Q-tick: mix, reassemble the I/Q pair, retime
-                    // the symbol clock, update the carrier
-                    // estimate, emit the soft symbol.
-                    let q = pll.mix_q(filtered);
-                    let symbol = Complex::new(*pending_i, q);
-                    timing.retime(symbol);
-                    pll.update_estimate(*pending_i, q);
-                    Some(slice_soft(symbol))
-                }
-                _ => None,
-            },
+            }
         }
     }
 }

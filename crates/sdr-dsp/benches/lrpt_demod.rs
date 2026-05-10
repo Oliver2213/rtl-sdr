@@ -12,17 +12,29 @@ use sdr_types::Complex;
 /// 1 second of input at the demod's 144 ksps working sample rate.
 const SAMPLES_1S: usize = 144_000;
 
+/// Per-rail amplitude for a unit-power QPSK / OQPSK constellation
+/// point: 1/√2 ≈ 0.707, so each corner sits on the unit circle.
+const RAIL_AMP: f32 = core::f32::consts::FRAC_1_SQRT_2;
+
+/// Synthetic stream cadence for these benches: 2 input samples
+/// per symbol, matching the LRPT demod chain's working rate.
+const SAMPLES_PER_SYMBOL: usize = 2;
+
+/// Length of the deterministic constellation pattern fed into the
+/// demod (one entry per QPSK quadrant).
+const PATTERN_LEN: usize = 4;
+
 fn bench_demod_qpsk(c: &mut Criterion) {
     let symbols = [
-        Complex::new(0.707, 0.707),
-        Complex::new(-0.707, 0.707),
-        Complex::new(0.707, -0.707),
-        Complex::new(-0.707, -0.707),
+        Complex::new(RAIL_AMP, RAIL_AMP),
+        Complex::new(-RAIL_AMP, RAIL_AMP),
+        Complex::new(RAIL_AMP, -RAIL_AMP),
+        Complex::new(-RAIL_AMP, -RAIL_AMP),
     ];
     let buf: Vec<Complex> = (0..SAMPLES_1S)
         .map(|n| {
-            if n % 2 == 0 {
-                symbols[(n / 2) % 4]
+            if n % SAMPLES_PER_SYMBOL == 0 {
+                symbols[(n / SAMPLES_PER_SYMBOL) % PATTERN_LEN]
             } else {
                 Complex::new(0.0, 0.0)
             }
@@ -47,12 +59,12 @@ fn bench_demod_oqpsk(c: &mut Criterion) {
     // OQPSK input: I-only sample on even indices, Q-only on odd
     // (the canonical "Q delayed by Tsym/2" representation at
     // 2 sps).
-    let i_vals = [0.707_f32, -0.707, 0.707, -0.707];
-    let q_vals = [0.707_f32, 0.707, -0.707, -0.707];
+    let i_vals = [RAIL_AMP, -RAIL_AMP, RAIL_AMP, -RAIL_AMP];
+    let q_vals = [RAIL_AMP, RAIL_AMP, -RAIL_AMP, -RAIL_AMP];
     let buf: Vec<Complex> = (0..SAMPLES_1S)
         .map(|n| {
-            let sym_idx = (n / 2) % 4;
-            if n % 2 == 0 {
+            let sym_idx = (n / SAMPLES_PER_SYMBOL) % PATTERN_LEN;
+            if n % SAMPLES_PER_SYMBOL == 0 {
                 Complex::new(i_vals[sym_idx], 0.0)
             } else {
                 Complex::new(0.0, q_vals[sym_idx])
