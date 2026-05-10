@@ -11538,6 +11538,43 @@ fn connect_satellites_panel(
                         // be at the wrong rate and the demod's
                         // resampler would sit at the wrong
                         // setpoint. Per epic #469 task 7.
+
+                        // Tell the DSP thread which Meteor
+                        // modulation to use for this pass —
+                        // METEOR-M N2 was QPSK; the active
+                        // METEOR-M2 3 / M2-4 are OQPSK. Sent
+                        // BEFORE `open_lrpt_viewer_if_needed`
+                        // (which triggers lazy decoder init)
+                        // so the freshly-built decoder uses
+                        // the right inner chain. Per #662.
+                        //
+                        // Always send — even when the catalog
+                        // lookup misses or returns
+                        // `lrpt_modulation = None`. Otherwise
+                        // the previous pass's modulation leaks
+                        // into the next decoder init (the
+                        // controller stash defaults to OQPSK at
+                        // startup but mutates per
+                        // `SetLrptModulation`, so a Qpsk-then-
+                        // None sequence would silently keep the
+                        // Qpsk chain). Fallback is `Qpsk`
+                        // because that's the standards-default
+                        // LRPT modulation; a future LRPT
+                        // satellite that turns up uncatalogued
+                        // is more likely to be standard-spec
+                        // than Meteor-style OQPSK. Per CR
+                        // round 1 on PR #663.
+                        let modulation = sdr_sat::KNOWN_SATELLITES
+                            .iter()
+                            .find(|s| s.norad_id == norad_id)
+                            .and_then(|s| s.lrpt_modulation)
+                            .unwrap_or(sdr_sat::LrptModulation::Qpsk);
+                        let dsp_mode = match modulation {
+                            sdr_sat::LrptModulation::Qpsk => sdr_dsp::lrpt::LrptMode::Qpsk,
+                            sdr_sat::LrptModulation::Oqpsk => sdr_dsp::lrpt::LrptMode::Oqpsk,
+                        };
+                        state_a.send_dsp(sdr_core::messages::UiToDsp::SetLrptModulation(dsp_mode));
+
                         crate::lrpt_viewer::open_lrpt_viewer_if_needed(
                             &parent_provider_a,
                             &state_a,
