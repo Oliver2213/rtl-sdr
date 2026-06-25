@@ -29,9 +29,7 @@ impl KeyringStore {
 
     pub fn set(&self, key: &str, value: &str) -> Result<(), KeyringError> {
         let entry = self.entry(key)?;
-        entry
-            .set_password(value)
-            .map_err(|e| KeyringError::Platform(e.to_string()))
+        entry.set_password(value).map_err(map_keyring_error)
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>, KeyringError> {
@@ -39,7 +37,7 @@ impl KeyringStore {
         match entry.get_password() {
             Ok(val) => Ok(Some(val)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(KeyringError::Platform(e.to_string())),
+            Err(e) => Err(map_keyring_error(e)),
         }
     }
 
@@ -47,7 +45,7 @@ impl KeyringStore {
         let entry = self.entry(key)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(KeyringError::Platform(e.to_string())),
+            Err(e) => Err(map_keyring_error(e)),
         }
     }
 
@@ -61,18 +59,31 @@ impl KeyringStore {
     }
 
     fn entry(&self, key: &str) -> Result<keyring::Entry, KeyringError> {
-        keyring::Entry::new(&self.service, key).map_err(|e| match e {
-            // keyring 4 surfaces two "no usable backend" shapes, both of
-            // which should degrade to the in-memory/JSON fallback rather
-            // than hard-error: `NoStorageAccess` (a backend is registered
-            // but locked/unreachable) and the new `NoDefaultStore` (no
-            // platform store could be registered at all — e.g. a target
-            // without a compiled-in backend). Per #681.
-            keyring::Error::NoStorageAccess(_) | keyring::Error::NoDefaultStore => {
-                KeyringError::NoBackend
-            }
-            other => KeyringError::Platform(other.to_string()),
-        })
+        keyring::Entry::new(&self.service, key).map_err(map_keyring_error)
+    }
+}
+
+/// Collapse a `keyring` error into our error type.
+///
+/// The "no usable backend" shapes map to [`KeyringError::NoBackend`] so
+/// callers fall back to the in-memory / JSON path instead of hard-failing.
+/// Both can surface from `Entry::new` **and** from the get/set/delete
+/// operations — the Secret Service / D-Bus connection is lazy, so a backend
+/// that exists at entry-creation time can still be locked or unreachable
+/// when an operation actually runs:
+///   * `NoStorageAccess` — a backend is registered but locked or unreachable
+///     (a locked GNOME Keyring, a headless box with no Secret Service
+///     session, a missing `DBUS_SESSION_BUS_ADDRESS`, …).
+///   * `NoDefaultStore` — keyring 4's `v1` auto-registration couldn't wire
+///     any platform store (e.g. an unsupported target). Per #681.
+///
+/// Everything else is an opaque `Platform` error.
+fn map_keyring_error(e: keyring::Error) -> KeyringError {
+    match e {
+        keyring::Error::NoStorageAccess(_) | keyring::Error::NoDefaultStore => {
+            KeyringError::NoBackend
+        }
+        other => KeyringError::Platform(other.to_string()),
     }
 }
 

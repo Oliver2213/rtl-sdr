@@ -183,8 +183,12 @@ quick-xml = "0.37"
 # first `Entry::new`, auto-registers the right native store per OS —
 # Secret Service (zbus) on Linux, Keychain on macOS, Credential
 # Manager on Windows. That auto-registration is what keeps us off the
-# silent no-op store that bit us on keyring 3 (PR #346): with `v1` a
-# real backend is always wired, no per-OS feature juggling. Per #681.
+# silent no-op store that bit us on keyring 3 (PR #346): `v1` always
+# *attempts* to wire a real backend rather than silently defaulting to a
+# no-op one. Registration can still fail at runtime (headless box, no
+# Secret Service session, unsupported target), surfacing as
+# `NoDefaultStore` — which `keyring_store.rs` maps to a graceful
+# in-memory/JSON fallback. Per #681.
 keyring = { version = "4", features = ["v1"] }
 
 # Whisper speech-to-text
