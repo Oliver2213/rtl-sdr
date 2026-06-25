@@ -69,7 +69,7 @@ pub const KEYRING_SERVICE: &str = "sdr-rs";
 /// Keyring entry name holding the `rtl_tcp` pre-shared auth key.
 /// Stored as a lowercase-hex string so it round-trips through
 /// keyring's `String` API without custom base64/UTF-8 coercion
-/// — `rand::OsRng`-backed keys are arbitrary bytes, not text.
+/// — `rand::rngs::SysRng`-backed keys are arbitrary bytes, not text.
 /// Per issue #395.
 pub const KEYRING_KEY_AUTH_KEY: &str = "rtl_tcp-server-auth-key";
 

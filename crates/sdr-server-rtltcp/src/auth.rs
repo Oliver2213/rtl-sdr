@@ -4,7 +4,7 @@
 //! Two responsibilities:
 //!
 //! 1. **Key generation** — [`generate_random_auth_key`] wraps
-//!    [`rand::rngs::OsRng`] to produce a 32-byte key. OS-backed
+//!    [`rand::rngs::SysRng`] to produce a 32-byte key. OS-backed
 //!    CSPRNG (reads from `/dev/urandom` on unix, `BCryptGenRandom`
 //!    on Windows), so no seed management on our side. 32 bytes =
 //!    256 bits of entropy, more than sufficient for the threat
@@ -25,7 +25,7 @@
 //! bridges the two with verification + a helper to produce the
 //! expected key at server-start time.
 
-use rand::RngCore;
+use rand::TryRng;
 use subtle::ConstantTimeEq;
 
 /// Size in bytes of the server-generated random key. 32 bytes
@@ -44,14 +44,21 @@ pub const DEFAULT_AUTH_KEY_LEN: usize = 32;
 /// - Tests that need a realistic key shape.
 ///
 /// OS-CSPRNG means there's no seed state on our side — every
-/// call is independent. `rand::rngs::OsRng` is infallible in
+/// call is independent. `rand::rngs::SysRng` is infallible in
 /// practice on our targets (the `try_fill_bytes` path would only
 /// surface an error on exotic platforms where `/dev/urandom` is
-/// unreadable; we don't support those).
+/// unreadable; we don't support those, hence the `.expect`).
 #[must_use]
 pub fn generate_random_auth_key() -> Vec<u8> {
     let mut buf = vec![0u8; DEFAULT_AUTH_KEY_LEN];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    // rand 0.10 renamed the OS interface `OsRng` → `SysRng` and made it a
+    // fallible `TryRng` (OS entropy calls *can* fail in principle). The
+    // `.expect()` preserves the old infallible contract: getrandom(2) /
+    // getentropy don't fail in practice on the unix/Windows targets we
+    // support — see the doc comment above.
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS CSPRNG (SysRng) unavailable — unsupported platform");
     buf
 }
 
@@ -132,7 +139,7 @@ mod tests {
 
     #[test]
     fn generate_random_auth_key_entropy_smoke_check() {
-        // Cheap sanity check that the OsRng is actually doing
+        // Cheap sanity check that the SysRng is actually doing
         // something — two consecutive calls should produce
         // different bytes. A broken rand impl (e.g., a stub
         // returning zeros) would fail this.
@@ -140,7 +147,7 @@ mod tests {
         let b = generate_random_auth_key();
         assert_ne!(
             a, b,
-            "two successive OsRng-based key generations must differ"
+            "two successive SysRng-based key generations must differ"
         );
     }
 

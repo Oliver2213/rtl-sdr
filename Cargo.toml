@@ -221,9 +221,13 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # server (#394) key generator — `OsRng` wraps `/dev/urandom` on
 # unix and `BCryptGenRandom` on Windows, which is what we want for
 # a 32-byte pre-shared key (CSPRNG quality, no seed management).
-# Pinned to 0.8.x until we need the 0.9 API rework; 0.8 is still
-# the ecosystem-majority version as of the workspace's 1.95 pin.
-rand = "0.8"
+# Bumped 0.8 → 0.10 (#680): rand 0.9+ split the Rng traits into
+# infallible and fallible halves, and rand 0.10 renamed the OS
+# interface `OsRng` → `SysRng` (a fallible `TryRng`, since OS
+# entropy calls can fail). See
+# `sdr-server-rtltcp::auth::generate_random_auth_key` for how the
+# key generator adapts it back to the old infallible contract.
+rand = "0.10"
 
 # Constant-time primitives. Used by the rtl_tcp optional-auth
 # server (#394) for the `ConstantTimeEq` compare between the
