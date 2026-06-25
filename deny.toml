@@ -36,6 +36,11 @@ allow = [
     "Zlib",
     "0BSD",
     "BSL-1.0",
+    # `bzip2-1.0.6` is the pure-Rust `libbz2-rs-sys` backend that bzip2 0.6
+    # pulls in by default (replacing the C `bzip2-sys`). It's the permissive
+    # BSD-style bzip2/libbzip2 license — GPL-compatible, so it links cleanly
+    # into this GPL-2.0-or-later app. Per #682.
+    "bzip2-1.0.6",
     # `LGPL-2.0-only` is `sdr-acars` — the spun-out acarsdec port, whose
     # upstream license is the GNU Library GPL v2 with no "or later" grant.
     # Linkable into this GPL-2.0-or-later app: LGPL→GPL is a permitted
