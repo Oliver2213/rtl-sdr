@@ -279,7 +279,14 @@ fn run(
     }
     eprintln!("total: {saved} PNGs in {}", out_dir.display());
     if saved == 0 {
-        return Err("no PNGs written — likely no usable signal in the input IQ".into());
+        let input_kind = if soft {
+            "soft-symbol input"
+        } else {
+            "input IQ"
+        };
+        return Err(format!(
+            "no PNGs written — likely no usable signal in the {input_kind}"
+        ));
     }
     Ok(())
 }

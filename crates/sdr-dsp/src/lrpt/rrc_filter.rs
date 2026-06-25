@@ -154,6 +154,9 @@ fn rrc_coeff(stage_no: usize, taps: usize, osf: f32, alpha: f32) -> f32 {
     const BLACKMAN_A0: f32 = 0.42;
     const BLACKMAN_A1: f32 = 0.5;
     const BLACKMAN_A2: f32 = 0.08;
+    /// Tolerance for detecting the `t = 1/(4α)` (`4αt = 1`) RRC
+    /// singularity where the `interm` denominator vanishes.
+    const RRC_SINGULARITY_EPS: f32 = 1.0e-6;
     // filter.c:79 — order = (taps - 1)/2;
     let order = (taps - 1) / 2;
 
@@ -164,16 +167,32 @@ fn rrc_coeff(stage_no: usize, taps: usize, osf: f32, alpha: f32) -> f32 {
 
     // filter.c:86 — t = abs(order - stage_no)/osf;  (integer abs, then /osf)
     let t = (order as i32 - stage_no as i32).unsigned_abs() as f32 / osf;
+
+    // filter.c:91 — Blackman window keyed on the absolute index stage_no.
+    let taps_m1 = (taps - 1) as f32;
+    let window = BLACKMAN_A0 - BLACKMAN_A1 * (2.0 * PI * stage_no as f32 / taps_m1).cos()
+        + BLACKMAN_A2 * (4.0 * PI * stage_no as f32 / taps_m1).cos();
+
+    // The `interm` denominator below vanishes at the t = 1/(4α)
+    // singularity (4αt = 1). The C reference (`filter.c`) has no
+    // guard — at the Meteor config (osf = 2, α = 0.6) the singular
+    // point t = 0.4167 never lands on an integer tap, so it can't be
+    // hit. But `new` accepts an arbitrary `osf` (e.g. 2.4 puts a tap
+    // exactly there), so for the public API we substitute the
+    // standard RRC L'Hôpital limit rather than emit a NaN.
+    if (4.0 * alpha * t - 1.0).abs() < RRC_SINGULARITY_EPS {
+        let singular = (alpha / 2.0_f32.sqrt())
+            * ((1.0 + 2.0 / PI) * (PI / (4.0 * alpha)).sin()
+                + (1.0 - 2.0 / PI) * (PI / (4.0 * alpha)).cos());
+        return singular * window * NORM;
+    }
+
     // filter.c:87 — coeff = sin(πt(1-α)) + 4αt·cos(πt(1+α));
     let mut coeff =
         (PI * t * (1.0 - alpha)).sin() + 4.0 * alpha * t * (PI * t * (1.0 + alpha)).cos();
     // filter.c:88 — interm = πt(1 - (4αt)^2);
     let interm = PI * t * (1.0 - (4.0 * alpha * t) * (4.0 * alpha * t));
-
-    // filter.c:91 — Blackman window keyed on the absolute index stage_no.
-    let taps_m1 = (taps - 1) as f32;
-    coeff *= BLACKMAN_A0 - BLACKMAN_A1 * (2.0 * PI * stage_no as f32 / taps_m1).cos()
-        + BLACKMAN_A2 * (4.0 * PI * stage_no as f32 / taps_m1).cos();
+    coeff *= window;
 
     // filter.c:93 — return coeff / interm * norm;
     coeff / interm * NORM
@@ -271,5 +290,31 @@ mod tests {
         assert!(RrcFilter::new(f32::INFINITY).is_err());
         let f = RrcFilter::new(2.0).expect("valid osf");
         assert!(f.get(INTERP_FACTOR).is_none());
+    }
+
+    /// At `osf = 2.4` the prototype oversampling is `osf*factor = 12`,
+    /// so a tap 5 from center lands exactly on the `t = 1/(4α)`
+    /// singularity (`4·0.6·5/12 = 1`). The limit branch must keep the
+    /// coefficient finite instead of dividing by zero (NaN).
+    #[test]
+    fn handles_rrc_singularity_finitely() {
+        let center = NUM_COEFFS / 2;
+        let c = rrc_coeff(center - 5, NUM_COEFFS, 12.0, ROLLOFF);
+        assert!(
+            c.is_finite(),
+            "tap at the 1/(4α) singularity must be finite, got {c}"
+        );
+        // The whole filter at osf=2.4 must produce only finite output.
+        let mut f = RrcFilter::new(2.4).expect("valid osf");
+        for _ in 0..NUM_TAPS {
+            f.push(Complex::new(1.0, 0.0));
+        }
+        for phase in 0..INTERP_FACTOR {
+            let out = f.get(phase).expect("phase in range");
+            assert!(
+                out.re.is_finite() && out.im.is_finite(),
+                "phase {phase} non-finite"
+            );
+        }
     }
 }

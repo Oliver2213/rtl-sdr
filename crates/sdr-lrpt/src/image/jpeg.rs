@@ -399,7 +399,7 @@ pub fn fill_dqt(q: u8) -> Dqt {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "max scaled value is QUANT_TEMPLATE max (121) × max f (≈238 from 5000/qf at qf≈21) / 100 ≈ 288, fits in u16"
+            reason = "q != 0 (caller-guarded), so max f is 5000 at q=1; QUANT_TEMPLATE max 121 gives max scaled ≈ 6050, which fits in u16"
         )]
         let raw = scaled.max(QUALITY_MIN_DQT) as u16;
         *slot = raw;
