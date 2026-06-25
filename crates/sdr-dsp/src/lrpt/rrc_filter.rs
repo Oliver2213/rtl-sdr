@@ -86,6 +86,15 @@ impl RrcFilter {
                 );
             }
         }
+        // The `osf > 0 && finite` gate above doesn't catch extreme
+        // finite values: a huge `osf` overflows `osf * INTERP_FACTOR`
+        // to ∞ or drives `t` to 0, producing NaN/Inf taps. Reject the
+        // filter rather than hand back a poisoned coefficient bank.
+        if coeffs.iter().any(|c| !c.is_finite()) {
+            return Err(DspError::InvalidParameter(format!(
+                "RRC oversampling factor {osf} produced non-finite filter taps"
+            )));
+        }
         Ok(Self {
             coeffs,
             mem: [Complex::new(0.0, 0.0); NUM_TAPS],
@@ -288,6 +297,10 @@ mod tests {
         assert!(RrcFilter::new(-1.0).is_err());
         assert!(RrcFilter::new(f32::NAN).is_err());
         assert!(RrcFilter::new(f32::INFINITY).is_err());
+        // An extreme but finite osf overflows `osf * INTERP_FACTOR`
+        // to ∞ → NaN taps; must be rejected too, not just NaN/Inf
+        // inputs.
+        assert!(RrcFilter::new(f32::MAX).is_err());
         let f = RrcFilter::new(2.0).expect("valid osf");
         assert!(f.get(INTERP_FACTOR).is_none());
     }
