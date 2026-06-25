@@ -4,7 +4,7 @@ Rust port of SDR++ — software-defined radio application with GTK4 UI.
 
 ## Architecture
 
-22-member workspace (root binary + 21 library crates) with clear dependency boundaries.
+23-member workspace (root binary + 22 library crates) with clear dependency boundaries.
 The driver layer (`sdr-rtlsdr`) was spun out as a standalone published crate
 [`librtlsdr-rs`](https://crates.io/crates/librtlsdr-rs) and is consumed from
 crates.io rather than as a path dependency.
@@ -15,7 +15,7 @@ sdr-dsp               → Pure DSP: math, filters, FFT, demod, resampling, APT d
 sdr-config            → JSON configuration persistence + OS keyring (depends on: types)
 sdr-pipeline          → Threading, streaming, signal path (depends on: types, dsp, config)
 librtlsdr-rs          → External: pure-Rust port of librtlsdr over rusb — 5 tuner families
-sdr-rtltcp-discovery  → mDNS browser/responder for `_rtl_tcp._tcp.local.` services
+sdr-rtltcp-discovery  → External: mDNS browser/responder for `_rtl_tcp._tcp.local.` (crates.io)
 sdr-server-rtltcp     → `rtl_tcp` server — share a local dongle over TCP
 sdr-source-rtlsdr     → RTL-SDR source module (depends on: types, pipeline, librtlsdr-rs, config)
 sdr-source-network    → TCP/UDP IQ source (depends on: types, pipeline, config)
@@ -23,6 +23,7 @@ sdr-source-file       → WAV file playback source (depends on: types, pipeline,
 sdr-sink-audio        → PipeWire/CoreAudio output (depends on: types, pipeline, config)
 sdr-sink-network      → TCP/UDP audio output (depends on: types, pipeline, config)
 sdr-radio             → Radio decoder, demod, IF/AF chains, APT image buffer (depends on: types, dsp, pipeline)
+sdr-lrpt              → Meteor-M LRPT decode pipeline (QPSK → Viterbi → RS → JPEG)
 sdr-radioreference    → RadioReference.com SOAP client (depends on: types, config)
 sdr-sat               → Satellite pass prediction (SGP4) + TLE cache + ground-station catalog
 sdr-scanner           → Multi-channel scanner engine — projection, dwell/hang, lockout
@@ -32,6 +33,7 @@ sdr-core              → Headless cross-platform engine facade (macOS port path
 sdr-splash            → Cross-platform splash subprocess controller (stdin wire protocol)
 sdr-splash-gtk        → Linux GTK4 splash window implementation
 sdr-ui                → GTK4/libadwaita UI — Linux-only (depends on: all above)
+sdr-tray              → StatusNotifierItem tray-icon sidecar (Linux-only)
 sdr (binary)          → Entry point (depends on: ui, core, splash, transcription, …)
 ```
 
