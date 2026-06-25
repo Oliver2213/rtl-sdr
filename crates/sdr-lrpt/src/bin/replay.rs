@@ -29,7 +29,7 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use sdr_dsp::lrpt::{LrptDemod, LrptMode, SAMPLE_RATE_HZ};
+use sdr_dsp::lrpt::{LrptDemod, LrptMode, SAMPLE_RATE_HZ, SYMBOL_RATE_HZ};
 use sdr_lrpt::{
     LrptPipeline,
     image::{save_channel, save_composite},
@@ -70,14 +70,18 @@ fn main() -> ExitCode {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 4 {
-        eprintln!("usage: sdr-lrpt-replay <input.iq> <output_dir> [qpsk|oqpsk|soft|soft-diff]");
+        eprintln!(
+            "usage: sdr-lrpt-replay <input.iq> <output_dir> \
+             [qpsk|qpsk-diff|oqpsk|oqpsk-diff|soft|soft-diff]"
+        );
         eprintln!();
         eprintln!("input.iq:    interleaved complex<f32> @ {SAMPLE_RATE_HZ} Hz");
         eprintln!("             (or interleaved i8 soft pairs for soft / soft-diff)");
         eprintln!("output_dir:  one ch<APID>.png written per detected channel");
-        eprintln!("mode:        qpsk (current M2-3/M2-4, default) | oqpsk | soft");
-        eprintln!("             (feed a meteor_demod .s file straight to the FEC chain)");
-        eprintln!("             | soft-diff (soft input + differential decode, legacy M2)");
+        eprintln!("mode:        qpsk (current M2-3/M2-4, default) | oqpsk  — demod IQ");
+        eprintln!("             qpsk-diff | oqpsk-diff  — demod IQ + differential decode");
+        eprintln!("             soft  — feed a meteor_demod .s file straight to the FEC chain");
+        eprintln!("             soft-diff  — soft input + differential decode (legacy M2)");
         return ExitCode::from(USAGE_EXIT_CODE);
     }
     // (demod mode, bypass-demod soft input?, differential precoding?)
@@ -125,16 +129,26 @@ fn run(
     // Optional debug: dump the demod's soft symbols (IQ path only) to
     // the file named by SDR_LRPT_DUMP_SYMS, for comparison against a
     // reference .s stream.
-    let mut sym_dump = std::env::var_os("SDR_LRPT_DUMP_SYMS")
-        .map(|p| std::io::BufWriter::new(File::create(p).expect("create SDR_LRPT_DUMP_SYMS file")));
+    let mut sym_dump = match std::env::var_os("SDR_LRPT_DUMP_SYMS") {
+        Some(p) => Some(std::io::BufWriter::new(File::create(&p).map_err(|e| {
+            format!(
+                "create SDR_LRPT_DUMP_SYMS file {}: {e}",
+                Path::new(&p).display()
+            )
+        })?)),
+        None => None,
+    };
     let mut buf = vec![0_u8; STREAM_CHUNK_BYTES];
     let mut total_samples = 0_u64;
     let mut symbol_count = 0_u64;
     if soft {
         // Input is interleaved 8-bit signed soft QPSK symbols (I, Q) —
         // e.g. a meteor_demod `.s` file. Bypass the demod and push the
-        // pairs straight into the FEC chain to isolate FEC/image from
-        // the demodulator.
+        // pairs straight into the FEC chain. A single pending I byte is
+        // carried across read-chunk boundaries so a pair split at the
+        // buffer edge isn't dropped (which would desync every later
+        // pair); an odd total byte count is rejected at EOF.
+        let mut pending_i: Option<i8> = None;
         loop {
             let n = reader
                 .read(&mut buf)
@@ -142,14 +156,21 @@ fn run(
             if n == 0 {
                 break;
             }
-            let aligned = n - (n % 2);
-            for pair in buf[..aligned].chunks_exact(2) {
-                // Reinterpret each raw byte as a signed soft sample
-                // (the .s format is interleaved i8 I/Q components).
-                pipeline.push_symbol([pair[0].cast_signed(), pair[1].cast_signed()]);
-                symbol_count += 1;
+            for &b in &buf[..n] {
+                match pending_i.take() {
+                    None => pending_i = Some(b.cast_signed()),
+                    Some(i) => {
+                        // (i, q) = a complete soft I/Q symbol pair.
+                        pipeline.push_symbol([i, b.cast_signed()]);
+                        symbol_count += 1;
+                    }
+                }
             }
-            total_samples += (aligned / 2) as u64;
+        }
+        if pending_i.is_some() {
+            return Err(format!(
+                "input {in_path} has an odd number of soft bytes — not whole i8 I/Q pairs"
+            ));
         }
     } else {
         let mut demod =
@@ -166,11 +187,15 @@ fn run(
                 break;
             }
             let aligned = n - (n % IQ_SAMPLE_BYTES);
-            let samples: &[Complex] = bytemuck::cast_slice(&buf[..aligned]);
+            // `try_cast_slice` (not `cast_slice`) so a misaligned/odd
+            // buffer surfaces a clean error instead of panicking.
+            let samples: &[Complex] = bytemuck::try_cast_slice(&buf[..aligned])
+                .map_err(|e| format!("IQ sample cast failed ({e:?})"))?;
             for &sample in samples {
                 if let Some(soft) = demod.process(sample) {
                     if let Some(w) = sym_dump.as_mut() {
-                        let _ = w.write_all(&[soft[0].cast_unsigned(), soft[1].cast_unsigned()]);
+                        w.write_all(&[soft[0].cast_unsigned(), soft[1].cast_unsigned()])
+                            .map_err(|e| format!("symbol-dump write: {e}"))?;
                     }
                     pipeline.push_symbol(soft);
                     symbol_count += 1;
@@ -188,13 +213,23 @@ fn run(
         }
     }
 
+    // Report in the units that match the input: soft mode reads
+    // symbol pairs at the symbol rate, IQ mode reads complex samples
+    // at the IF sample rate.
     #[allow(
         clippy::cast_precision_loss,
-        reason = "total_samples is bounded by file size; even hours-long captures stay below f64's 52-bit mantissa"
+        reason = "counts are bounded by file size; even hours-long captures stay below f64's 52-bit mantissa"
     )]
-    let duration_s = total_samples as f64 / f64::from(SAMPLE_RATE_HZ);
-    eprintln!("input: {total_samples} samples ({duration_s:.1} s @ {SAMPLE_RATE_HZ} Hz)");
-    eprintln!("processed: {symbol_count} symbol pairs from {total_samples} IQ samples");
+    if soft {
+        let duration_s = symbol_count as f64 / f64::from(SYMBOL_RATE_HZ);
+        eprintln!(
+            "input: {symbol_count} soft symbol pairs ({duration_s:.1} s @ {SYMBOL_RATE_HZ} sym/s)"
+        );
+    } else {
+        let duration_s = total_samples as f64 / f64::from(SAMPLE_RATE_HZ);
+        eprintln!("input: {total_samples} IQ samples ({duration_s:.1} s @ {SAMPLE_RATE_HZ} Hz)");
+        eprintln!("processed: {symbol_count} symbol pairs from {total_samples} IQ samples");
+    }
     let st = pipeline.fec_stats();
     eprintln!(
         "fec: rotation_locks={} cadus_decoded={} cadus_failed={}",

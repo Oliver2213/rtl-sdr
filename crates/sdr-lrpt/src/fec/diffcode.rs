@@ -36,14 +36,19 @@
 /// dbdexter casts straight to `int8_t` and lets 128 wrap to `-128`;
 /// clamping is both safer and a no-op for every real soft sample
 /// (the demod never emits `-128`).
+/// Soft-symbol saturation magnitude — the largest value the slicer
+/// produces (`i8::MAX`). `signsqrt` clamps to this so the single
+/// edge case `-128 × -128 → 128` fits `i8`.
+const SOFT_SAT: i32 = 127;
+
 #[must_use]
 fn signsqrt(x: i32) -> i8 {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
-        reason = "isqrt of |x| <= 16384 is <= 128; clamped to i8::MAX below"
+        reason = "isqrt of |x| <= 16384 is <= 128; clamped to SOFT_SAT below"
     )]
-    let root = (x.unsigned_abs().isqrt() as i32).min(127) as i8;
+    let root = (x.unsigned_abs().isqrt() as i32).min(SOFT_SAT) as i8;
     if x < 0 { -root } else { root }
 }
 

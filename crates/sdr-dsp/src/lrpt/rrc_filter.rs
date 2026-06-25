@@ -17,7 +17,7 @@
 
 use core::f32::consts::PI;
 
-use sdr_types::Complex;
+use sdr_types::{Complex, DspError};
 
 /// RRC design order. `meteor_demod/demod.h:12` (`RRC_ORDER 32`).
 pub const RRC_ORDER: usize = 32;
@@ -59,12 +59,20 @@ impl RrcFilter {
     /// `filter_init_rrc` (`filter.c:9-28`): the prototype is
     /// evaluated at `osf*factor` and decomposed into `factor`
     /// phases.
-    #[must_use]
+    /// # Errors
+    ///
+    /// Returns [`DspError::InvalidParameter`] if `osf` is not finite
+    /// and positive — those would silently produce invalid taps.
     #[allow(
         clippy::cast_precision_loss,
         reason = "INTERP_FACTOR (= 5) converts to f32 exactly"
     )]
-    pub fn new(osf: f32) -> Self {
+    pub fn new(osf: f32) -> Result<Self, DspError> {
+        if !osf.is_finite() || osf <= 0.0 {
+            return Err(DspError::InvalidParameter(format!(
+                "RRC oversampling factor must be finite and positive, got {osf}"
+            )));
+        }
         let mut coeffs = [0.0_f32; NUM_COEFFS];
         // filter.c:18-22 — coeffs[j*taps + i] = rrc_coeff(i*factor + j,
         //                   taps*factor, osf*factor, alpha)
@@ -78,11 +86,11 @@ impl RrcFilter {
                 );
             }
         }
-        Self {
+        Ok(Self {
             coeffs,
             mem: [Complex::new(0.0, 0.0); NUM_TAPS],
             idx: 0,
-        }
+        })
     }
 
     /// Push one input sample into the circular history.
@@ -93,12 +101,18 @@ impl RrcFilter {
         self.idx %= NUM_TAPS;
     }
 
-    /// Evaluate polyphase sub-filter for `phase` (0..[`INTERP_FACTOR`])
+    /// Evaluate polyphase sub-filter for `phase` (`0..INTERP_FACTOR`)
     /// against the current history. Transliterates `filter_get`
     /// (`filter.c:45-65`), including the sub-filter phase reversal
     /// `(interp_factor - phase - 1)` and the two-chunk circular walk
-    /// starting at `idx`.
-    pub fn get(&self, phase: usize) -> Complex {
+    /// starting at `idx`. Returns `None` for `phase >= INTERP_FACTOR`
+    /// (which would otherwise underflow the sub-filter index) — a
+    /// public-API guard against caller error.
+    #[must_use]
+    pub fn get(&self, phase: usize) -> Option<Complex> {
+        if phase >= INTERP_FACTOR {
+            return None;
+        }
         let mut result = Complex::new(0.0, 0.0);
         // filter.c:52 — j = (interp_factor - phase - 1) * size
         let mut j = (INTERP_FACTOR - phase - 1) * NUM_TAPS;
@@ -112,7 +126,7 @@ impl RrcFilter {
             result += self.mem[i] * self.coeffs[j];
             j += 1;
         }
-        result
+        Some(result)
     }
 }
 
@@ -135,6 +149,11 @@ impl RrcFilter {
 fn rrc_coeff(stage_no: usize, taps: usize, osf: f32, alpha: f32) -> f32 {
     // filter.c:73 — const float norm = 2.0/5.0;
     const NORM: f32 = 2.0 / 5.0;
+    // Blackman window coefficients (filter.c:91 — the source comment
+    // mislabels these as "Hamming"; 0.42/0.5/0.08 is Blackman).
+    const BLACKMAN_A0: f32 = 0.42;
+    const BLACKMAN_A1: f32 = 0.5;
+    const BLACKMAN_A2: f32 = 0.08;
     // filter.c:79 — order = (taps - 1)/2;
     let order = (taps - 1) / 2;
 
@@ -153,8 +172,8 @@ fn rrc_coeff(stage_no: usize, taps: usize, osf: f32, alpha: f32) -> f32 {
 
     // filter.c:91 — Blackman window keyed on the absolute index stage_no.
     let taps_m1 = (taps - 1) as f32;
-    coeff *= 0.42 - 0.5 * (2.0 * PI * stage_no as f32 / taps_m1).cos()
-        + 0.08 * (4.0 * PI * stage_no as f32 / taps_m1).cos();
+    coeff *= BLACKMAN_A0 - BLACKMAN_A1 * (2.0 * PI * stage_no as f32 / taps_m1).cos()
+        + BLACKMAN_A2 * (4.0 * PI * stage_no as f32 / taps_m1).cos();
 
     // filter.c:93 — return coeff / interm * norm;
     coeff / interm * NORM
@@ -227,18 +246,30 @@ mod tests {
     /// for every polyphase phase.
     #[test]
     fn get_is_finite_for_all_phases() {
-        let mut f = RrcFilter::new(2.0);
+        let mut f = RrcFilter::new(2.0).expect("valid osf");
         for n in 0..NUM_TAPS {
             #[allow(clippy::cast_precision_loss)]
             let v = (n as f32 * 0.1).sin();
             f.push(Complex::new(v, -v));
         }
         for phase in 0..INTERP_FACTOR {
-            let out = f.get(phase);
+            let out = f.get(phase).expect("phase in range");
             assert!(
                 out.re.is_finite() && out.im.is_finite(),
                 "phase {phase} non-finite"
             );
         }
+    }
+
+    /// `RrcFilter::new` rejects non-finite / non-positive osf, and
+    /// `get` rejects out-of-range phase — the public-API guards.
+    #[test]
+    fn rejects_invalid_inputs() {
+        assert!(RrcFilter::new(0.0).is_err());
+        assert!(RrcFilter::new(-1.0).is_err());
+        assert!(RrcFilter::new(f32::NAN).is_err());
+        assert!(RrcFilter::new(f32::INFINITY).is_err());
+        let f = RrcFilter::new(2.0).expect("valid osf");
+        assert!(f.get(INTERP_FACTOR).is_none());
     }
 }

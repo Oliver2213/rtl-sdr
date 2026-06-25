@@ -22,8 +22,9 @@
 //!
 //! The polyphase RRC ([`RrcFilter`]) is both the matched filter and
 //! the fractional-delay interpolator the timing loop steers
-//! (`INTERP_FACTOR` = 5 sub-phases per input sample), so the M&M
-//! loop has 0.1-sample timing authority rather than the 1-sample
+//! (`INTERP_FACTOR` = 5 sub-phases per input sample = 1/5 = 0.2 of
+//! an input sample, or 1/10 = 0.1 of a symbol at 2 sps), so the M&M
+//! loop has 0.1-symbol timing authority rather than the 1-sample
 //! authority a single-rate filter would give. The AGC, PLL, and
 //! Mueller-Muller modules are exact ports of `dsp/{agc,pll,timing}.c`.
 //!
@@ -174,7 +175,7 @@ impl LrptDemod {
             },
         };
         Ok(Self {
-            rrc: RrcFilter::new(OSF),
+            rrc: RrcFilter::new(OSF)?,
             inner,
         })
     }
@@ -215,7 +216,10 @@ impl LrptDemod {
                 // demod.c:33-45 — for i in 0..interp_factor { if advance_timeslot() {...} }
                 for phase in 0..INTERP_FACTOR {
                     if timing.advance_timeslot() {
-                        let mut out = rrc.get(phase); // filter_get(flt, i)
+                        // phase is always < INTERP_FACTOR here, so get() is Some.
+                        let Some(mut out) = rrc.get(phase) else {
+                            continue;
+                        }; // filter_get(flt, i)
                         out = agc.process(out); // agc_apply(out)
                         out = pll.mix(out); // pll_mix(out)
                         timing.retime(out); // retime(out)
@@ -235,13 +239,15 @@ impl LrptDemod {
                     match timing.advance_timeslot_dual() {
                         1 => {
                             // demod.c:66-71 — intersample: capture the I rail only.
-                            let out = agc.process(rrc.get(phase));
+                            let Some(s) = rrc.get(phase) else { continue };
+                            let out = agc.process(s);
                             *pending_i = pll.mix_i(out);
                         }
                         2 => {
                             // demod.c:72-83 — actual sample: capture Q, reassemble
                             // I/Q, retime, update carrier, emit.
-                            let out = agc.process(rrc.get(phase));
+                            let Some(s) = rrc.get(phase) else { continue };
+                            let out = agc.process(s);
                             let quad = pll.mix_q(out);
                             let symbol = Complex::new(*pending_i, quad);
                             timing.retime(symbol);

@@ -179,9 +179,11 @@ impl LrptPipeline {
     /// run the JPEG decoder for each MCU in the packet, and
     /// place each decoded block in the channel buffer.
     ///
-    /// Per medet's `mj_dec_mcus` layout: image packet payload
-    /// starts with 6 metadata bytes (MCU id, scan headers,
-    /// quality byte) followed by the JPEG-coded MCU stream.
+    /// Image-packet payload layout (after the demux strips the
+    /// 6-byte CCSDS primary header): an 8-byte MPDU timestamp
+    /// secondary header ([`MPDU_TIME_HEADER_LEN`]), then the 6-byte
+    /// AVHRR MCU-segment header ([`IMAGE_PACKET_HEADER_LEN`]: MCU id,
+    /// scan headers, quality byte), then the JPEG-coded MCU stream.
     fn consume_packet(&mut self, packet: &ImagePacket) {
         if packet.apid == APID_ONBOARD_TIME {
             return;

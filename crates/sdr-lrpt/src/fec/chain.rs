@@ -272,6 +272,7 @@ impl FecChain {
         self.sync = SyncCorrelator::new();
         self.derand.reset();
         self.state = State::HuntingRotation;
+        self.stats = FecStats::default();
     }
 
     /// Currently-locked rotation, or `None` while the chain is

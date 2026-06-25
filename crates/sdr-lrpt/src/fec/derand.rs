@@ -30,22 +30,37 @@
 /// Length of the CCSDS PN sequence (one period).
 pub const PN_PERIOD: usize = 255;
 
+/// LFSR seed for the CCSDS PN generator — all ones, per
+/// CCSDS 131.0-B-3 / dbdexter `descramble_init` (`state = 0xFF`).
+const PN_LFSR_SEED: u8 = 0xff;
+
+/// Feedback tap bit positions for the polynomial
+/// h(x) = x^8 + x^7 + x^5 + x^3 + 1 — combined by XOR into the new
+/// high bit each shift (`descramble.c`: `(state>>7) ^ (state>>5) ^
+/// (state>>3) ^ (state>>0)`).
+const PN_LFSR_TAPS: [u8; 4] = [7, 5, 3, 0];
+
 /// Generate the CCSDS PN sequence from the spec LFSR at compile
-/// time. Polynomial h(x) = x^8 + x^7 + x^5 + x^3 + 1 (feedback
-/// taps at bits 7, 5, 3, 0), seeded with all ones. Each output
-/// byte takes the register LSB MSB-first across 8 shifts. This is
-/// a byte-for-byte transliteration of dbdexter's `descramble_init`
+/// time (see [`PN_LFSR_SEED`] / [`PN_LFSR_TAPS`]). Each output byte
+/// takes the register LSB MSB-first across 8 shifts. Byte-for-byte
+/// transliteration of dbdexter's `descramble_init`
 /// (`meteor_decode/ecc/descramble.c`); see the module docs for why
 /// it is generated rather than tabulated.
 const fn generate_pn_table() -> [u8; PN_PERIOD] {
     let mut table = [0_u8; PN_PERIOD];
-    let mut state: u8 = 0xff;
+    let mut state: u8 = PN_LFSR_SEED;
     let mut i = 0;
     while i < PN_PERIOD {
         let mut byte: u8 = 0;
         let mut bit = 0;
         while bit < 8 {
-            let newbit = ((state >> 7) & 1) ^ ((state >> 5) & 1) ^ ((state >> 3) & 1) ^ (state & 1);
+            // newbit = XOR of the tapped state bits.
+            let mut newbit = 0_u8;
+            let mut t = 0;
+            while t < PN_LFSR_TAPS.len() {
+                newbit ^= (state >> PN_LFSR_TAPS[t]) & 1;
+                t += 1;
+            }
             byte = (byte << 1) | (state & 1);
             state = (state >> 1) | (newbit << 7);
             bit += 1;

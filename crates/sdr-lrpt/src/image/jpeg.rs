@@ -374,7 +374,19 @@ const QUALITY_MIN_DQT: f32 = 1.0;
 /// template scaled by the packet's quality byte. Public so the
 /// LRPT pipeline can compute it once per packet and pass the
 /// same `Dqt` to every MCU in that packet.
+///
+/// # Preconditions
+///
+/// `q` must be non-zero: the hyperbolic branch divides
+/// [`QUALITY_HYPERBOLIC_NUM`] by `q`, so `q == 0` yields non-finite
+/// coefficients. The LRPT pipeline enforces this in
+/// `consume_packet` (matching dbdexter's `avhrr_decode`, which skips
+/// `q == 0` packets); the `debug_assert` documents the contract.
 pub fn fill_dqt(q: u8) -> Dqt {
+    debug_assert!(
+        q != 0,
+        "fill_dqt requires non-zero quality (q == 0 divides by zero)"
+    );
     let qf = f32::from(q);
     let f = if qf < QUALITY_HYPERBOLIC_MAX {
         QUALITY_HYPERBOLIC_NUM / qf
