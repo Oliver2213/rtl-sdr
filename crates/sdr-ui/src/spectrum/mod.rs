@@ -701,10 +701,9 @@ pub fn build_spectrum_view(
         &vfo_offset_callback,
         &scanner_axis_lock,
     );
-    attach_scroll_gesture(&waterfall_area, &vfo_state);
-
-    // Also attach scroll-to-zoom on the FFT area for convenience.
-    attach_scroll_gesture(&fft_area, &vfo_state);
+    // Scroll-to-zoom on both spectrum panes. They share `vfo_state`, so each
+    // zoom redraws both panes to keep them in sync. Per #657.
+    attach_scroll_gesture(&fft_area, &waterfall_area, &vfo_state);
 
     let paned = gtk4::Paned::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -1287,36 +1286,58 @@ fn attach_drag_gesture(
 /// Attach a scroll-to-zoom gesture to a `DrawingArea`.
 ///
 /// Scrolling zooms the frequency display range centered on the cursor position.
-fn attach_scroll_gesture(area: &gtk4::DrawingArea, vfo_state: &Rc<RefCell<VfoState>>) {
-    let scroll = gtk4::EventControllerScroll::new(
-        gtk4::EventControllerScrollFlags::VERTICAL | gtk4::EventControllerScrollFlags::DISCRETE,
-    );
+///
+/// Attaches to BOTH spectrum panes (FFT plot + waterfall). They share one
+/// `VfoState`, so a zoom on either pane must redraw both — otherwise the pane
+/// that didn't receive the scroll keeps rendering the previous zoom range and
+/// its VFO overlay / frequency axis drift out of alignment with the zoomed
+/// pane. Most visible while paused, when no fresh FFT frames force a redraw.
+/// Per #657.
+fn attach_scroll_gesture(
+    fft_area: &gtk4::DrawingArea,
+    waterfall_area: &gtk4::DrawingArea,
+    vfo_state: &Rc<RefCell<VfoState>>,
+) {
+    for target in [fft_area, waterfall_area] {
+        let scroll = gtk4::EventControllerScroll::new(
+            gtk4::EventControllerScrollFlags::VERTICAL | gtk4::EventControllerScrollFlags::DISCRETE,
+        );
 
-    let vfo_state = Rc::clone(vfo_state);
-    let area_weak = area.downgrade();
-    scroll.connect_scroll(move |_controller, _dx, dy| {
-        let Some(area) = area_weak.upgrade() else {
-            return glib::Propagation::Stop;
-        };
-        let width = f64::from(area.width());
+        let vfo_state = Rc::clone(vfo_state);
+        let target_weak = target.downgrade();
+        let fft_weak = fft_area.downgrade();
+        let waterfall_weak = waterfall_area.downgrade();
+        scroll.connect_scroll(move |_controller, _dx, dy| {
+            let Some(target) = target_weak.upgrade() else {
+                return glib::Propagation::Stop;
+            };
+            let width = f64::from(target.width());
 
-        // TODO: Anchor zoom on cursor position instead of display center.
-        // GTK4 EventControllerScroll doesn't provide position in the scroll
-        // signal. Add an EventControllerMotion to track the pointer and use
-        // its last-known X coordinate here for cursor-centered zoom.
-        let cursor_x = width / 2.0;
+            // TODO: Anchor zoom on cursor position instead of display center.
+            // GTK4 EventControllerScroll doesn't provide position in the scroll
+            // signal. Add an EventControllerMotion to track the pointer and use
+            // its last-known X coordinate here for cursor-centered zoom.
+            let cursor_x = width / 2.0;
 
-        let mut vfo = vfo_state.borrow_mut();
-        let cursor_hz = vfo.pixel_to_hz(cursor_x, width);
+            let mut vfo = vfo_state.borrow_mut();
+            let cursor_hz = vfo.pixel_to_hz(cursor_x, width);
 
-        // dy > 0 = scroll down = zoom out; dy < 0 = scroll up = zoom in.
-        vfo.zoom(cursor_hz, -dy);
+            // dy > 0 = scroll down = zoom out; dy < 0 = scroll up = zoom in.
+            vfo.zoom(cursor_hz, -dy);
+            drop(vfo);
 
-        drop(vfo);
-        area.queue_draw();
+            // Redraw BOTH panes — they share `vfo_state`, so a one-sided
+            // queue_draw would strand the other pane on the old zoom. Per #657.
+            if let Some(a) = fft_weak.upgrade() {
+                a.queue_draw();
+            }
+            if let Some(a) = waterfall_weak.upgrade() {
+                a.queue_draw();
+            }
 
-        glib::Propagation::Stop
-    });
+            glib::Propagation::Stop
+        });
 
-    area.add_controller(scroll);
+        target.add_controller(scroll);
+    }
 }

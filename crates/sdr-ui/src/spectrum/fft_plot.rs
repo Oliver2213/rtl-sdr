@@ -55,21 +55,35 @@ const BACKGROUND_COLOR: [f64; 4] = [0.08, 0.08, 0.10, 1.0];
 /// are reduced to a single bin by taking the maximum dB value in each group.
 /// This preserves signal peaks. Returns a slice of the downsampled buffer,
 /// or the original data if no downsampling is needed.
+fn downsample_fft<'a>(data: &'a [f32], buf: &'a mut Vec<f32>) -> &'a [f32] {
+    if data.len() <= MAX_DISPLAY_BINS {
+        return data;
+    }
+    max_pool_to(data, buf, MAX_DISPLAY_BINS);
+    buf
+}
+
+/// Max-pool `data` into `out_bins` buckets (one max per bucket), writing
+/// the result into `buf`.
+///
+/// Bucket `i` spans `[floor(i·ratio), ceil((i+1)·ratio))`, so buckets
+/// overlap by up to one bin on non-integer ratios — this guarantees every
+/// input bin (including the final one) is covered by some bucket. The
+/// waterfall renderer's `downsample_to` uses the identical bucketing; the
+/// two MUST stay in lockstep, otherwise the FFT trace and the waterfall
+/// spectrogram disagree on the last bin whenever the FFT is wider than
+/// `MAX_DISPLAY_BINS` (the `.ceil()` here was previously missing — #657).
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn downsample_fft<'a>(data: &'a [f32], buf: &'a mut Vec<f32>) -> &'a [f32] {
-    if data.len() <= MAX_DISPLAY_BINS {
-        return data;
-    }
-    let out_bins = MAX_DISPLAY_BINS;
+fn max_pool_to(data: &[f32], buf: &mut Vec<f32>, out_bins: usize) {
     buf.resize(out_bins, f32::NEG_INFINITY);
     let ratio = data.len() as f32 / out_bins as f32;
     for (i, out) in buf.iter_mut().enumerate().take(out_bins) {
         let start = (i as f32 * ratio) as usize;
-        let end = (((i + 1) as f32) * ratio) as usize;
+        let end = (((i + 1) as f32) * ratio).ceil() as usize;
         let end = end.min(data.len());
         let mut max_val = f32::NEG_INFINITY;
         for &v in &data[start..end] {
@@ -79,7 +93,6 @@ fn downsample_fft<'a>(data: &'a [f32], buf: &'a mut Vec<f32>) -> &'a [f32] {
         }
         *out = max_val;
     }
-    buf
 }
 
 /// Cairo renderer for the FFT power spectrum plot.
@@ -679,5 +692,22 @@ mod tests {
         );
         // active - bw/2 = 145.875 MHz → x = 800 * (145.875M - 144M) / 4M = 375.0
         assert!((x - 375.0).abs() < 0.1, "expected ~375.0, got {x}");
+    }
+
+    /// The max-pool bucketing must match the waterfall's `downsample_to`
+    /// exactly (overlapping buckets via `.ceil()`), or the FFT trace and the
+    /// waterfall disagree on the final bin once the FFT is wider than
+    /// `MAX_DISPLAY_BINS`. 7 bins -> 3: ratio 2.333, buckets [0..3), [2..5),
+    /// [4..7). Without `.ceil()` the buckets would be [0..2), [2..4), [4..6),
+    /// dropping bins 6 (and the peak that lives there).
+    #[test]
+    fn max_pool_non_divisible_covers_all_bins() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let mut buf = Vec::new();
+        max_pool_to(&data, &mut buf, 3);
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf[0], 3.0); // max(1, 2, 3)
+        assert_eq!(buf[1], 5.0); // max(3, 4, 5)
+        assert_eq!(buf[2], 7.0); // max(5, 6, 7) — final bin covered
     }
 }
