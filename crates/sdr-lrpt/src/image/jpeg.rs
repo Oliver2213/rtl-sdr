@@ -346,15 +346,18 @@ impl JpegDecoder {
     }
 }
 
-/// Lower bound (exclusive) of the Meteor JPEG quality band that
-/// uses the `5000 / qf` scaling rule. Below or at this threshold
-/// the linear `200 - 2 * qf` rule applies instead.
-const QUALITY_HYPERBOLIC_MIN: f32 = 20.0;
-/// Upper bound (exclusive) of the same hyperbolic band. At or
-/// above this quality the linear rule takes over again.
+/// Quality threshold separating the two scaling rules. For
+/// `qf < 50` the hyperbolic `5000 / qf` rule applies; for
+/// `qf >= 50` the linear `200 - 2 * qf` rule does. Per dbdexter
+/// `jpeg.c::quantization` (`if (quality < 50) ... else ...`) — note
+/// there is **no** lower bound: a previous revision gated the
+/// hyperbolic branch on `qf > 20` as well, which mis-scaled every
+/// low-quality (qf ≤ 20) packet onto the linear rule. Quality 0 is
+/// guarded upstream (`fill_dqt` is only called for non-zero
+/// quality), so `5000 / qf` never divides by zero.
 const QUALITY_HYPERBOLIC_MAX: f32 = 50.0;
 /// Numerator of the hyperbolic quality rule: `f = HYP_NUM / qf`
-/// for qf ∈ (`QUALITY_HYPERBOLIC_MIN`, `QUALITY_HYPERBOLIC_MAX`).
+/// for `qf < QUALITY_HYPERBOLIC_MAX`.
 const QUALITY_HYPERBOLIC_NUM: f32 = 5000.0;
 /// Constant term of the linear quality rule: `f = LIN_BASE - LIN_SLOPE * qf`.
 const QUALITY_LINEAR_BASE: f32 = 200.0;
@@ -371,9 +374,21 @@ const QUALITY_MIN_DQT: f32 = 1.0;
 /// template scaled by the packet's quality byte. Public so the
 /// LRPT pipeline can compute it once per packet and pass the
 /// same `Dqt` to every MCU in that packet.
+///
+/// # Preconditions
+///
+/// `q` must be non-zero: the hyperbolic branch divides
+/// [`QUALITY_HYPERBOLIC_NUM`] by `q`, so `q == 0` yields non-finite
+/// coefficients. The LRPT pipeline enforces this in
+/// `consume_packet` (matching dbdexter's `avhrr_decode`, which skips
+/// `q == 0` packets); the `debug_assert` documents the contract.
 pub fn fill_dqt(q: u8) -> Dqt {
+    debug_assert!(
+        q != 0,
+        "fill_dqt requires non-zero quality (q == 0 divides by zero)"
+    );
     let qf = f32::from(q);
-    let f = if qf > QUALITY_HYPERBOLIC_MIN && qf < QUALITY_HYPERBOLIC_MAX {
+    let f = if qf < QUALITY_HYPERBOLIC_MAX {
         QUALITY_HYPERBOLIC_NUM / qf
     } else {
         QUALITY_LINEAR_BASE - QUALITY_LINEAR_SLOPE * qf
@@ -384,7 +399,7 @@ pub fn fill_dqt(q: u8) -> Dqt {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "max scaled value is QUANT_TEMPLATE max (121) × max f (≈238 from 5000/qf at qf≈21) / 100 ≈ 288, fits in u16"
+            reason = "q != 0 (caller-guarded), so max f is 5000 at q=1; QUANT_TEMPLATE max 121 gives max scaled ≈ 6050, which fits in u16"
         )]
         let raw = scaled.max(QUALITY_MIN_DQT) as u16;
         *slot = raw;

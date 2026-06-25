@@ -25,11 +25,11 @@
 //! every stage of epic #469.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use sdr_dsp::lrpt::{LrptDemod, SAMPLE_RATE_HZ};
+use sdr_dsp::lrpt::{LrptDemod, LrptMode, SAMPLE_RATE_HZ, SYMBOL_RATE_HZ};
 use sdr_lrpt::{
     LrptPipeline,
     image::{save_channel, save_composite},
@@ -38,10 +38,6 @@ use sdr_types::Complex;
 
 /// Bytes per IQ sample on disk: two f32s (real + imag).
 const IQ_SAMPLE_BYTES: usize = 8;
-
-/// CLI argv length: `sdr-lrpt-replay <input.iq> <output_dir>`
-/// = 3 elements (program name + 2 positional args).
-const EXPECTED_ARGC: usize = 3;
 
 /// Exit code for usage errors (missing args). Convention follows
 /// BSD `sysexits.h`: 64 = `EX_USAGE`. We use 2 here for parity
@@ -73,14 +69,38 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt::try_init().ok();
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != EXPECTED_ARGC {
-        eprintln!("usage: sdr-lrpt-replay <input.iq> <output_dir>");
+    if args.len() < 3 || args.len() > 4 {
+        eprintln!(
+            "usage: sdr-lrpt-replay <input.iq> <output_dir> \
+             [qpsk|qpsk-diff|oqpsk|oqpsk-diff|soft|soft-diff]"
+        );
         eprintln!();
         eprintln!("input.iq:    interleaved complex<f32> @ {SAMPLE_RATE_HZ} Hz");
+        eprintln!("             (or interleaved i8 soft pairs for soft / soft-diff)");
         eprintln!("output_dir:  one ch<APID>.png written per detected channel");
+        eprintln!("mode:        qpsk (current M2-3/M2-4, default) | oqpsk  — demod IQ");
+        eprintln!("             qpsk-diff | oqpsk-diff  — demod IQ + differential decode");
+        eprintln!("             soft  — feed a meteor_demod .s file straight to the FEC chain");
+        eprintln!("             soft-diff  — soft input + differential decode (legacy M2)");
         return ExitCode::from(USAGE_EXIT_CODE);
     }
-    match run(&args[1], &PathBuf::from(&args[2])) {
+    // (demod mode, bypass-demod soft input?, differential precoding?)
+    let (mode, soft, differential) = match args.get(3).map(String::as_str) {
+        None | Some("qpsk") => (LrptMode::Qpsk, false, false),
+        Some("qpsk-diff") => (LrptMode::Qpsk, false, true),
+        Some("oqpsk") => (LrptMode::Oqpsk, false, false),
+        Some("oqpsk-diff") => (LrptMode::Oqpsk, false, true),
+        Some("soft") => (LrptMode::Qpsk, true, false),
+        Some("soft-diff") => (LrptMode::Qpsk, true, true),
+        Some(other) => {
+            eprintln!(
+                "error: unknown mode '{other}' (expected qpsk, qpsk-diff, oqpsk, oqpsk-diff, soft, or soft-diff)"
+            );
+            return ExitCode::from(USAGE_EXIT_CODE);
+        }
+    };
+    eprintln!("mode: {mode:?} soft_input={soft} differential={differential}");
+    match run(&args[1], &PathBuf::from(&args[2]), mode, soft, differential) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -89,54 +109,132 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(in_path: &str, out_dir: &Path) -> Result<(), String> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear CLI driver: stream IQ/soft input → demod → FEC → PNGs, plus optional diagnostics"
+)]
+fn run(
+    in_path: &str,
+    out_dir: &Path,
+    mode: LrptMode,
+    soft: bool,
+    differential: bool,
+) -> Result<(), String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
 
     let file = File::open(in_path).map_err(|e| format!("open {in_path}: {e}"))?;
     let mut reader = BufReader::new(file);
 
-    let mut demod = LrptDemod::new().map_err(|e| format!("LrptDemod::new: {e}"))?;
-    let mut pipeline = LrptPipeline::new();
+    let mut pipeline = LrptPipeline::new_with_differential(differential);
+    // Optional debug: dump the demod's soft symbols (IQ path only) to
+    // the file named by SDR_LRPT_DUMP_SYMS, for comparison against a
+    // reference .s stream.
+    let mut sym_dump = match std::env::var_os("SDR_LRPT_DUMP_SYMS") {
+        Some(p) => Some(std::io::BufWriter::new(File::create(&p).map_err(|e| {
+            format!(
+                "create SDR_LRPT_DUMP_SYMS file {}: {e}",
+                Path::new(&p).display()
+            )
+        })?)),
+        None => None,
+    };
     let mut buf = vec![0_u8; STREAM_CHUNK_BYTES];
     let mut total_samples = 0_u64;
     let mut symbol_count = 0_u64;
-    loop {
-        // Read up to STREAM_CHUNK_BYTES. Chunks at end-of-file
-        // may be short; only multiples of IQ_SAMPLE_BYTES are
-        // processed and the trailing partial sample (if any)
-        // gets reported as an alignment error after the loop.
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("read {in_path}: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        let aligned = n - (n % IQ_SAMPLE_BYTES);
-        let samples: &[Complex] = bytemuck::cast_slice(&buf[..aligned]);
-        for &sample in samples {
-            if let Some(soft) = demod.process(sample) {
-                pipeline.push_symbol(soft);
-                symbol_count += 1;
+    if soft {
+        // Input is interleaved 8-bit signed soft QPSK symbols (I, Q) —
+        // e.g. a meteor_demod `.s` file. Bypass the demod and push the
+        // pairs straight into the FEC chain. A single pending I byte is
+        // carried across read-chunk boundaries so a pair split at the
+        // buffer edge isn't dropped (which would desync every later
+        // pair); an odd total byte count is rejected at EOF.
+        let mut pending_i: Option<i8> = None;
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("read {in_path}: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                match pending_i.take() {
+                    None => pending_i = Some(b.cast_signed()),
+                    Some(i) => {
+                        // (i, q) = a complete soft I/Q symbol pair.
+                        pipeline.push_symbol([i, b.cast_signed()]);
+                        symbol_count += 1;
+                    }
+                }
             }
         }
-        total_samples += (aligned / IQ_SAMPLE_BYTES) as u64;
-        // If the read was short AND alignment trimmed bytes off,
-        // the file's last partial sample is invalid.
-        if n != STREAM_CHUNK_BYTES && n != aligned {
+        if pending_i.is_some() {
             return Err(format!(
-                "input {in_path} has {n_partial} trailing bytes that don't form a complete sample (need a multiple of {IQ_SAMPLE_BYTES})",
-                n_partial = n - aligned,
+                "input {in_path} has an odd number of soft bytes — not whole i8 I/Q pairs"
             ));
+        }
+    } else {
+        let mut demod =
+            LrptDemod::new_with_mode(mode).map_err(|e| format!("LrptDemod::new_with_mode: {e}"))?;
+        loop {
+            // Read up to STREAM_CHUNK_BYTES. Chunks at end-of-file
+            // may be short; only multiples of IQ_SAMPLE_BYTES are
+            // processed and the trailing partial sample (if any)
+            // gets reported as an alignment error after the loop.
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("read {in_path}: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            let aligned = n - (n % IQ_SAMPLE_BYTES);
+            // `try_cast_slice` (not `cast_slice`) so a misaligned/odd
+            // buffer surfaces a clean error instead of panicking.
+            let samples: &[Complex] = bytemuck::try_cast_slice(&buf[..aligned])
+                .map_err(|e| format!("IQ sample cast failed ({e:?})"))?;
+            for &sample in samples {
+                if let Some(soft) = demod.process(sample) {
+                    if let Some(w) = sym_dump.as_mut() {
+                        w.write_all(&[soft[0].cast_unsigned(), soft[1].cast_unsigned()])
+                            .map_err(|e| format!("symbol-dump write: {e}"))?;
+                    }
+                    pipeline.push_symbol(soft);
+                    symbol_count += 1;
+                }
+            }
+            total_samples += (aligned / IQ_SAMPLE_BYTES) as u64;
+            // If the read was short AND alignment trimmed bytes off,
+            // the file's last partial sample is invalid.
+            if n != STREAM_CHUNK_BYTES && n != aligned {
+                return Err(format!(
+                    "input {in_path} has {n_partial} trailing bytes that don't form a complete sample (need a multiple of {IQ_SAMPLE_BYTES})",
+                    n_partial = n - aligned,
+                ));
+            }
         }
     }
 
+    // Report in the units that match the input: soft mode reads
+    // symbol pairs at the symbol rate, IQ mode reads complex samples
+    // at the IF sample rate.
     #[allow(
         clippy::cast_precision_loss,
-        reason = "total_samples is bounded by file size; even hours-long captures stay below f64's 52-bit mantissa"
+        reason = "counts are bounded by file size; even hours-long captures stay below f64's 52-bit mantissa"
     )]
-    let duration_s = total_samples as f64 / f64::from(SAMPLE_RATE_HZ);
-    eprintln!("input: {total_samples} samples ({duration_s:.1} s @ {SAMPLE_RATE_HZ} Hz)");
-    eprintln!("processed: {symbol_count} symbol pairs from {total_samples} IQ samples");
+    if soft {
+        let duration_s = symbol_count as f64 / f64::from(SYMBOL_RATE_HZ);
+        eprintln!(
+            "input: {symbol_count} soft symbol pairs ({duration_s:.1} s @ {SYMBOL_RATE_HZ} sym/s)"
+        );
+    } else {
+        let duration_s = total_samples as f64 / f64::from(SAMPLE_RATE_HZ);
+        eprintln!("input: {total_samples} IQ samples ({duration_s:.1} s @ {SAMPLE_RATE_HZ} Hz)");
+        eprintln!("processed: {symbol_count} symbol pairs from {total_samples} IQ samples");
+    }
+    let st = pipeline.fec_stats();
+    eprintln!(
+        "fec: rotation_locks={} cadus_decoded={} cadus_failed={}",
+        st.rotation_locks, st.cadus_decoded, st.cadus_failed,
+    );
 
     let assembler = pipeline.assembler();
     let mut saved = 0_usize;
@@ -181,7 +279,14 @@ fn run(in_path: &str, out_dir: &Path) -> Result<(), String> {
     }
     eprintln!("total: {saved} PNGs in {}", out_dir.display());
     if saved == 0 {
-        return Err("no PNGs written — likely no usable signal in the input IQ".into());
+        let input_kind = if soft {
+            "soft-symbol input"
+        } else {
+            "input IQ"
+        };
+        return Err(format!(
+            "no PNGs written — likely no usable signal in the {input_kind}"
+        ));
     }
     Ok(())
 }

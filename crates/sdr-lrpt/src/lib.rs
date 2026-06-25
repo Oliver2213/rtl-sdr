@@ -57,9 +57,27 @@ const SEQUENCE_COUNT_MODULUS: i32 = 1 << 14;
 /// shifting later MCU placements hundreds of rows.
 const WRAP_MIN_BACKWARD_DELTA: i32 = SEQUENCE_COUNT_MODULUS / 2;
 
-/// Image-packet payload header length in bytes: 1 byte MCU id +
-/// 2 bytes `scan_hdr` + 2 bytes `seg_hdr` + 1 byte quality.
-/// JPEG-coded MCU stream begins immediately after.
+/// CCSDS secondary-header length in bytes for Meteor image MPDUs:
+/// an 8-byte on-board timestamp (`day[2] + ms[4] + us[2]`) that
+/// sits between the 6-byte CCSDS primary header and the AVHRR MCU
+/// segment. The demux already strips the primary header, so each
+/// image packet's `payload` *starts* with this timestamp — the
+/// AVHRR header (and the JPEG stream) begin
+/// [`MPDU_TIME_HEADER_LEN`] bytes in.
+///
+/// Missing this offset is catastrophic: `payload[0]` is then the
+/// timestamp's day byte (constant across a pass), so every MCU
+/// lands in the same image column and the JPEG stream is read 8
+/// bytes early (pure garbage). Per dbdexter `protocol/mpdu.h`
+/// (`Mpdu.data = { Timestamp time; McuSegment mcu; }`).
+const MPDU_TIME_HEADER_LEN: usize = 8;
+
+/// AVHRR MCU-segment header length in bytes: 1 byte MCU id +
+/// 2 bytes `scan_hdr` + 3 bytes `segment_hdr` (the last of which
+/// is the quality byte). The JPEG-coded MCU stream begins
+/// immediately after, i.e. at payload offset
+/// [`MPDU_TIME_HEADER_LEN`] + [`IMAGE_PACKET_HEADER_LEN`].
+/// Per dbdexter `protocol/mcu.h` (`AVHRR` struct).
 const IMAGE_PACKET_HEADER_LEN: usize = 6;
 
 /// APID of the on-board-time / housekeeping packet. Carries no
@@ -110,12 +128,28 @@ impl Default for LrptPipeline {
 impl LrptPipeline {
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_differential(false)
+    }
+
+    /// Build a pipeline, choosing whether the downlink is
+    /// differentially precoded. Legacy Meteor-M2 (NORAD 40069) and
+    /// any `.s` captured from it use `true`; the current
+    /// Meteor-M2-3 / M2-4 birds use `false`.
+    #[must_use]
+    pub fn new_with_differential(differential: bool) -> Self {
         Self {
-            fec: FecChain::new(),
+            fec: FecChain::new_with_differential(differential),
             demux: Demux::new(),
             decoders: std::collections::HashMap::new(),
             assembler: ImageAssembler::new(),
         }
+    }
+
+    /// Snapshot the FEC chain's decode statistics (rotation locks,
+    /// CADUs decoded / failed). For diagnostics + status reporting.
+    #[must_use]
+    pub fn fec_stats(&self) -> crate::fec::FecStats {
+        self.fec.stats()
     }
 
     /// Push one soft-symbol pair from the QPSK demod through the
@@ -145,21 +179,35 @@ impl LrptPipeline {
     /// run the JPEG decoder for each MCU in the packet, and
     /// place each decoded block in the channel buffer.
     ///
-    /// Per medet's `mj_dec_mcus` layout: image packet payload
-    /// starts with 6 metadata bytes (MCU id, scan headers,
-    /// quality byte) followed by the JPEG-coded MCU stream.
+    /// Image-packet payload layout (after the demux strips the
+    /// 6-byte CCSDS primary header): an 8-byte MPDU timestamp
+    /// secondary header ([`MPDU_TIME_HEADER_LEN`]), then the 6-byte
+    /// AVHRR MCU-segment header ([`IMAGE_PACKET_HEADER_LEN`]: MCU id,
+    /// scan headers, quality byte), then the JPEG-coded MCU stream.
     fn consume_packet(&mut self, packet: &ImagePacket) {
         if packet.apid == APID_ONBOARD_TIME {
             return;
         }
-        if packet.payload.len() < IMAGE_PACKET_HEADER_LEN {
+        // Skip the 8-byte on-board timestamp secondary header to
+        // reach the AVHRR MCU segment. Without this, `payload[0]`
+        // is the timestamp's (near-constant) day byte, pinning
+        // every MCU to one column and shifting the JPEG stream 8
+        // bytes early into garbage.
+        if packet.payload.len() < MPDU_TIME_HEADER_LEN + IMAGE_PACKET_HEADER_LEN {
             return;
         }
-        let mcu_id = u16::from(packet.payload[0]);
-        // bytes 1-2 = scan_hdr, bytes 3-4 = seg_hdr (unused
-        // here; medet only displays them in debug logs).
-        let quality = packet.payload[5];
-        let jpeg_bytes = &packet.payload[IMAGE_PACKET_HEADER_LEN..];
+        let avhrr = &packet.payload[MPDU_TIME_HEADER_LEN..];
+        let mcu_id = u16::from(avhrr[0]);
+        // bytes 1-2 = scan_hdr, bytes 3-5 = segment_hdr (byte 5 of
+        // the AVHRR header = segment_hdr[2] = the quality factor).
+        let quality = avhrr[5];
+        // A zero quality factor would divide by zero in the
+        // hyperbolic dequant rule; dbdexter's `avhrr_decode` skips
+        // the packet outright in that case, so do the same.
+        if quality == 0 {
+            return;
+        }
+        let jpeg_bytes = &avhrr[IMAGE_PACKET_HEADER_LEN..];
 
         let decoder = self
             .decoders
@@ -367,9 +415,11 @@ mod tests {
     /// loop will succeed on every MCU and place 14 blocks into
     /// the assembler.
     fn synthetic_image_packet(apid: u16, sequence_count: u16) -> ImagePacket {
-        let mut payload = vec![0_u8; HEADER_LEN];
-        payload[0] = 0; // mcu_id starts at column 0
-        payload[5] = TEST_QUALITY; // per-packet quality byte
+        // 8-byte timestamp secondary header (zeros here) precedes
+        // the AVHRR header on every real image MPDU.
+        let mut payload = vec![0_u8; MPDU_TIME_HEADER_LEN + HEADER_LEN];
+        payload[MPDU_TIME_HEADER_LEN] = 0; // mcu_id starts at column 0
+        payload[MPDU_TIME_HEADER_LEN + 5] = TEST_QUALITY; // per-packet quality byte
         // Append 14 minimal MCUs back-to-back as one bit stream.
         // Each MCU is 6 bits (DC code "00" = cat 0, delta=0;
         // then AC EOB code "1010"). 14 × 6 = 84 bits = 10 full
@@ -379,7 +429,10 @@ mod tests {
             payload.extend_from_slice(&MCU_PATTERN_3B);
         }
         payload.extend_from_slice(&MCU_TAIL_2B);
-        debug_assert_eq!(payload.len() - HEADER_LEN, SYNTHETIC_TAIL_LEN);
+        debug_assert_eq!(
+            payload.len() - MPDU_TIME_HEADER_LEN - HEADER_LEN,
+            SYNTHETIC_TAIL_LEN
+        );
         ImagePacket {
             vcid: TEST_VCID,
             apid,
@@ -537,8 +590,10 @@ mod tests {
             apid: 64,
             sequence_count: 100,
             payload: {
-                let mut payload = vec![0_u8; HEADER_LEN];
-                payload[5] = TEST_QUALITY;
+                // Timestamp + AVHRR header, but no JPEG bytes after
+                // it — first decode_mcu hits EndOfStream.
+                let mut payload = vec![0_u8; MPDU_TIME_HEADER_LEN + HEADER_LEN];
+                payload[MPDU_TIME_HEADER_LEN + 5] = TEST_QUALITY;
                 payload
             },
         };
@@ -651,7 +706,7 @@ mod tests {
         // from 200 to 213, all past MCUS_PER_LINE = 196.
         let mut p = LrptPipeline::new();
         let mut pkt = synthetic_image_packet(64, 100);
-        pkt.payload[0] = 200; // overwrite the mcu_id byte
+        pkt.payload[MPDU_TIME_HEADER_LEN] = 200; // overwrite the mcu_id byte
         p.consume_packet(&pkt);
         // Channel state was created (we passed the early
         // returns), and the JPEG decode loop ran successfully

@@ -10,49 +10,47 @@
 //!
 //! [`SoftSyncDetector`] mirrors `medet`'s `corr_correlate`
 //! (`original/medet/correlator.pas:174`): build 8 rotated
-//! patterns from the encoded ASM (`0xFCA2_B63D_B00D_9794` —
-//! the bit string after running 0x1ACFFC1D through the CCSDS
-//! K=7 rate-1/2 convolutional encoder), slide a window over
-//! the incoming soft samples, score each pattern, and report
-//! the best match together with the rotation that matched.
+//! patterns from the encoded ASM ([`ASM_ENCODED`] — the bit
+//! string after running `0x1ACFFC1D` through the CCSDS K=7
+//! rate-1/2 convolutional encoder), slide a window over the
+//! incoming soft samples, score each pattern, and report the
+//! best match together with the rotation that matched.
 //! [`FecChain`] then applies the inverse rotation to every
 //! subsequent soft pair before feeding Viterbi, so Viterbi
 //! always sees the canonical orientation regardless of where
 //! Costas happened to lock.
 //!
-//! Reference (read-only): `original/medet/correlator.pas`.
-//! `original/medet/met_to_data.pas:74` confirms the encoded ASM
-//! constant.
+//! Reference (read-only): `original/medet/correlator.pas` and
+//! dbdexter `meteor_decode/correlator/correlator.c`.
 //!
 //! [`FecChain`]: super::FecChain
 
 /// Encoded form of the CCSDS attached sync marker (`0x1ACFFC1D`)
-/// after passing through OUR K=7 rate-1/2 convolutional encoder
-/// (`crates/sdr-lrpt/src/fec/viterbi.rs::ccsds_encode`). 64 bits
-/// = 32 QPSK symbols = 64 soft-sample axis components.
+/// after passing through the K=7 rate-1/2 convolutional encoder
+/// (`crates/sdr-lrpt/src/fec/viterbi.rs::ccsds_encode`), which now
+/// uses the on-wire CCSDS generators `0x79` / `0x5B`. 64 bits =
+/// 32 QPSK symbols = 64 soft-sample axis components.
 ///
-/// **Why not medet's value.** medet (`met_to_data.pas:74`) uses
-/// `qword($fca2b63db00d9794)`. Our convolutional encoder uses
-/// the bit-reversed polynomial form (`POLYA = 79`, `POLYB = 109`
-/// rather than the spec's `0o171` / `0o133`) and pushes input
-/// bits at the HIGH bit of the shift register. Both conventions
-/// are mathematically equivalent (the underlying convolutional
-/// code is linear, so any consistent encoder/decoder pair
-/// works), but they produce DIFFERENT encoded ASM bit strings.
-/// The pattern correlator must match the encoder it's paired
-/// with — so we use what `ccsds_encode` actually produces, not
-/// what medet produces.
+/// This value is the *canonical* (un-rotated) encoded ASM. The
+/// detector builds 8 rotated/swapped variants from it, so the
+/// constant only needs to match the encoder — I/Q swap, sign
+/// (180°), and 90°/270° phase are all recovered by the rotation
+/// search, not baked into this constant.
 ///
-/// `0x1ACFFC1D` was verified by hand against `ccsds_encode`
-/// output:
-/// ```text
-/// let bits: Vec<u8> = (0..32).map(|i| ((0x1ACF_FC1D_u32 >> (31 - i)) & 1) as u8).collect();
-/// let encoded = ccsds_encode(&bits)[..64];
-/// // Convert: positive soft → bit 0, negative → bit 1.
-/// // Resulting u64 (MSB first) = 0x0391_853E_8FF1_64AB
-/// ```
-/// Pinned by [`super::tests::asm_encoded_matches_ccsds_encode_output`].
-pub const ASM_ENCODED: u64 = 0x0391_853E_8FF1_64AB;
+/// **History.** A previous revision stored `0x0391_853E_8FF1_64AB`,
+/// computed from the *bit-reversed* encoder (`POLYA = 0x4F`,
+/// `POLYB = 0x6D`). That encoder produced a different code than
+/// the satellite, so this correlator could never lock onto a real
+/// pass. With the corrected wire generators the encoded ASM is
+/// `0x035D_49C2_4FF2_686B` (cross-checked: dbdexter's
+/// `conv_encode_u32(0x1ACFFC1D)` produces the same code; see
+/// `viterbi::tests::ccsds_encode_matches_dbdexter_conv_encode_u32`).
+///
+/// Derived MSB-first from `ccsds_encode`'s soft output (positive
+/// soft = encoder bit 0 → u64 bit 0; negative = bit 1) and pinned
+/// by [`super::tests::asm_encoded_matches_ccsds_encode_output`],
+/// so it cannot drift away from the encoder again.
+pub const ASM_ENCODED: u64 = 0x035D_49C2_4FF2_686B;
 
 /// Number of soft-sample axis components in the encoded ASM
 /// (= bits in [`ASM_ENCODED`]).

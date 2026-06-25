@@ -13,13 +13,15 @@
 
 pub mod chain;
 pub mod derand;
+pub mod diffcode;
 pub mod reed_solomon;
 pub mod soft_sync;
 pub mod sync;
 pub mod viterbi;
 
-pub use chain::FecChain;
+pub use chain::{FecChain, FecStats};
 pub use derand::Derandomizer;
+pub use diffcode::DiffDecoder;
 pub use reed_solomon::{K as RS_K, N as RS_N, ReedSolomon, RsError, T as RS_T};
 pub use soft_sync::{
     ASM_ENCODED, ASM_ENCODED_BITS, ROTATION_COUNT, Rotation, SOFT_SYNC_THRESHOLD, SoftSyncDetector,

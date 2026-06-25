@@ -42,7 +42,8 @@
 //! itself stays unit-testable on synthetic byte streams.
 
 use crate::fec::{
-    Derandomizer, ReedSolomon, Rotation, SoftSyncDetector, SyncCorrelator, ViterbiDecoder,
+    Derandomizer, DiffDecoder, ReedSolomon, Rotation, SoftSyncDetector, SyncCorrelator,
+    ViterbiDecoder,
 };
 
 /// Bytes captured per CADU after the ASM. Per CCSDS §10:
@@ -118,12 +119,32 @@ enum State {
 /// Streaming FEC chain — push one soft i8 symbol pair per call,
 /// receive a decoded VCDU when one becomes available.
 pub struct FecChain {
+    /// Differential pre-decoder, present only for differentially
+    /// precoded downlinks (legacy Meteor-M2). Applied to the raw
+    /// soft pair before sync/Viterbi, per dbdexter `decode.c`.
+    diff: Option<DiffDecoder>,
     detector: SoftSyncDetector,
     viterbi: ViterbiDecoder,
     sync: SyncCorrelator,
     derand: Derandomizer,
     rs: ReedSolomon,
     state: State,
+    /// Decode statistics for diagnostics / status reporting.
+    stats: FecStats,
+}
+
+/// Running decode statistics for a [`FecChain`]. Cheap counters
+/// surfaced for diagnostics and for the sync-robustness work
+/// (re-acquisition tuning).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FecStats {
+    /// Number of times the chain acquired rotation lock (entered
+    /// [`State::Locked`] from [`State::HuntingRotation`]).
+    pub rotation_locks: u64,
+    /// CADUs that decoded successfully (all 4 RS codewords ok).
+    pub cadus_decoded: u64,
+    /// CADUs whose RS decode failed (dropped).
+    pub cadus_failed: u64,
 }
 
 impl Default for FecChain {
@@ -133,16 +154,35 @@ impl Default for FecChain {
 }
 
 impl FecChain {
+    /// New chain for a non-differential downlink (current
+    /// Meteor-M2-3 / M2-4 — concatenated coding, no differential
+    /// precoding).
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_differential(false)
+    }
+
+    /// New chain, choosing whether the downlink is differentially
+    /// precoded. Legacy Meteor-M2 (NORAD 40069) uses `true`; the
+    /// current birds use `false`.
+    #[must_use]
+    pub fn new_with_differential(differential: bool) -> Self {
         Self {
+            diff: differential.then(DiffDecoder::new),
             detector: SoftSyncDetector::new(),
             viterbi: ViterbiDecoder::new(),
             sync: SyncCorrelator::new(),
             derand: Derandomizer::new(),
             rs: ReedSolomon::new(),
             state: State::HuntingRotation,
+            stats: FecStats::default(),
         }
+    }
+
+    /// Snapshot the running decode statistics.
+    #[must_use]
+    pub fn stats(&self) -> FecStats {
+        self.stats
     }
 
     /// Push one soft i8 symbol pair (one Viterbi-encoded bit's
@@ -152,6 +192,14 @@ impl FecChain {
     /// chain returns to hunting for the next ASM (without losing
     /// rotation lock).
     pub fn push_symbol(&mut self, soft: [i8; 2]) -> Option<Vec<u8>> {
+        // Differential pre-decode on the raw soft stream, before
+        // sync correlation and Viterbi (dbdexter `decode.c`: the
+        // `diff_decode` call precedes `correlate`). No-op for
+        // non-differential downlinks.
+        let soft = match &mut self.diff {
+            Some(diff) => diff.decode_pair(soft),
+            None => soft,
+        };
         match &self.state {
             State::HuntingRotation => {
                 if let Some(rotation) = self.detector.push_symbol(soft) {
@@ -169,6 +217,7 @@ impl FecChain {
                     // queued for emission once Viterbi's
                     // TRACEBACK_DEPTH-symbol warmup completes.
                     let window = self.detector.drain_window();
+                    self.stats.rotation_locks += 1;
                     self.state = State::Locked {
                         rotation,
                         is_capturing: false,
@@ -215,11 +264,15 @@ impl FecChain {
     /// window, derand position, rotation detector) all flush;
     /// in-flight CADU capture is dropped.
     pub fn reset(&mut self) {
+        if let Some(diff) = &mut self.diff {
+            diff.reset();
+        }
         self.detector.reset();
         self.viterbi = ViterbiDecoder::new();
         self.sync = SyncCorrelator::new();
         self.derand.reset();
         self.state = State::HuntingRotation;
+        self.stats = FecStats::default();
     }
 
     /// Currently-locked rotation, or `None` while the chain is
@@ -322,11 +375,15 @@ impl FecChain {
             for i in 0..RS_CODEWORD_LEN {
                 codeword[i] = cadu[i * RS_INTERLEAVE + col];
             }
-            let (corrected, _errors) = self.rs.decode(&codeword).ok()?;
+            let Ok((corrected, _errors)) = self.rs.decode(&codeword) else {
+                self.stats.cadus_failed += 1;
+                return None;
+            };
             for i in 0..RS_MESSAGE_LEN {
                 vcdu[i * RS_INTERLEAVE + col] = corrected[i];
             }
         }
+        self.stats.cadus_decoded += 1;
         Some(vcdu)
     }
 }
@@ -362,13 +419,61 @@ mod tests {
 
     #[test]
     fn decode_cadu_returns_none_on_invalid_codeword() {
-        // Hand-construct a CADU payload that's all zeros. After
-        // derand it becomes the PN sequence, which is not a
-        // valid RS codeword — every column should fail to decode
-        // and the chain should return None.
+        // Build a VALID RS-encoded, derandomised CADU (so the
+        // chain's derand recovers clean codewords), then corrupt
+        // one interleave column far beyond the RS correction
+        // capacity (t = 16). That column can't decode, so the
+        // all-or-nothing `decode_cadu` must return None.
+        //
+        // Note: we deliberately do NOT rely on "all-zeros → derand
+        // → PN is not a codeword" — that was an accident of an
+        // earlier corrupted PN table. This construction guarantees
+        // an uncorrectable column for any (correct) PN sequence.
+        let rs = ReedSolomon::new();
+        let mut vcdu = vec![0_u8; VCDU_LEN];
+        for (i, b) in vcdu.iter_mut().enumerate() {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "modulo 256 fits in u8 by definition"
+            )]
+            let byte = ((i * 7 + 11) % 256) as u8;
+            *b = byte;
+        }
+        let mut cadu = vec![0_u8; CADU_PAYLOAD_LEN];
+        for col in 0..RS_INTERLEAVE {
+            let mut message = [0_u8; RS_MESSAGE_LEN];
+            for i in 0..RS_MESSAGE_LEN {
+                message[i] = vcdu[i * RS_INTERLEAVE + col];
+            }
+            let codeword = rs.encode(&message);
+            for i in 0..RS_CODEWORD_LEN {
+                cadu[i * RS_INTERLEAVE + col] = codeword[i];
+            }
+        }
+        // Corrupt column 0 with the specific T+1 = 17-error
+        // pattern that `reed_solomon::tests::rejects_this_t_plus_
+        // one_pattern` pins as detectably uncorrectable (positions
+        // 0, 11, 22, … XOR 0x3C). RS beyond-T detection is NOT
+        // guaranteed for arbitrary patterns — far-over-capacity
+        // inputs can miscorrect to a different valid codeword and
+        // return Ok — so we reuse the known-caught pattern here.
+        // XOR is linear and survives the chain's later derand, so
+        // post-derand column 0 carries exactly these 17 errors.
+        for k in 0..=16 {
+            cadu[(k * 11) * RS_INTERLEAVE] ^= 0x3C;
+        }
+        // Apply derand so the chain's derand recovers our (corrupted)
+        // codewords.
+        let mut derand = Derandomizer::new();
+        derand.reset();
+        for byte in &mut cadu {
+            *byte = derand.process(*byte);
+        }
         let mut c = FecChain::new();
-        let cadu = vec![0_u8; CADU_PAYLOAD_LEN];
-        assert!(c.decode_cadu(cadu).is_none());
+        assert!(
+            c.decode_cadu(cadu).is_none(),
+            "a column with 255 byte-errors must exceed RS capacity and yield None",
+        );
     }
 
     #[test]

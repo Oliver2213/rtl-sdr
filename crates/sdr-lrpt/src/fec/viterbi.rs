@@ -6,22 +6,35 @@
 //! - Soft-decision input: i8 ±127 (Euclidean-style branch metric)
 //! - Output: 1 hard bit per pair of input soft symbols
 //!
-//! Polynomial constants are named after [medet's
-//! `viterbi27.pas`](original/medet/viterbi27.pas) (POLYA = 79,
-//! POLYB = 109) — these are the bit-reversed forms of the CCSDS
-//! spec's G1 = 0o171 / G2 = 0o133. Either convention is correct
-//! as long as encoder and decoder agree; matching medet means
-//! future differential tests against medet / `SatDump` output line
-//! up bit-exactly.
+//! Polynomial constants are the CCSDS spec generators
+//! G1 = 0o171 = `0x79` and G2 = 0o133 = `0x5B`, the exact values
+//! the Meteor satellite's encoder uses on the wire.
 //!
-//! Reference (read-only): `original/medet/viterbi27.pas`.
+//! **History — why NOT bit-reversed.** An earlier revision used
+//! the *bit-reversed* forms (`0x4F` / `0x6D`) with a note claiming
+//! "either convention is correct as long as encoder and decoder
+//! agree." That reasoning is the trap that broke every real
+//! decode: it holds only for a *closed* encoder+decoder pair. The
+//! satellite is the encoder and we control only the decoder, so we
+//! MUST match its convention. Bit-reversing both generators (with
+//! the same shift direction) is a genuinely *different* code — no
+//! phase rotation or I/Q swap can compensate — so the decoder
+//! could never read the wire. Proven empirically: with G1 = `0x79`
+//! / G2 = `0x5B`, [`ccsds_encode`] is byte-identical to dbdexter's
+//! `conv_encode_u32` for every test word.
+//!
+//! Reference (read-only): dbdexter `meteor_decode/ecc/viterbi.h`
+//! (`#define G1 0x79`, `#define G2 0x5B`, `K 7`) and
+//! `original/medet/viterbi27.pas`.
 
 use std::collections::VecDeque;
 
-/// Generator polynomial A (medet convention; bit-reversed CCSDS G1).
-pub const POLYA: u8 = 79; // 0b1001111
-/// Generator polynomial B (medet convention; bit-reversed CCSDS G2).
-pub const POLYB: u8 = 109; // 0b1101101
+/// Generator polynomial A — CCSDS G1 = 0o171 (the satellite's
+/// on-wire convention; see module docs for why this is NOT the
+/// bit-reversed form).
+pub const POLYA: u8 = 0x79; // 0b1111001 = 0o171
+/// Generator polynomial B — CCSDS G2 = 0o133 (on-wire convention).
+pub const POLYB: u8 = 0x5B; // 0b1011011 = 0o133
 
 /// Constraint length.
 pub const K: usize = 7;
@@ -75,8 +88,9 @@ impl ViterbiDecoder {
     /// tap with [`POLYA`] / [`POLYB`] to compute encoder output,
     /// then the successor state is `combined >> 1` (oldest bit
     /// dropped, `input_bit` slides into bit 5). This is the
-    /// standard `libfec` formulation and matches what medet's
-    /// encoder produces on the wire.
+    /// standard CCSDS / `libfec` formulation and, with
+    /// [`POLYA`] / [`POLYB`] = `0x79` / `0x5B`, matches the
+    /// satellite's on-wire encoder bit-for-bit.
     pub fn step(&mut self, soft: [i8; 2]) -> Option<u8> {
         let mut new_metrics = [i32::MIN / 2; NUM_STATES];
         let mut parents = [0_u8; NUM_STATES];
@@ -286,12 +300,56 @@ mod tests {
     }
 
     #[test]
-    fn medet_polynomials_match_documented_values() {
-        // Pin medet's POLYA / POLYB so a future "fix" doesn't
-        // silently flip the convention and break differential
-        // tests against medet / SatDump captures.
-        assert_eq!(POLYA, 0b100_1111);
-        assert_eq!(POLYB, 0b110_1101);
+    fn polynomials_match_ccsds_wire_convention() {
+        // Pin the CCSDS spec generators (G1 = 0o171, G2 = 0o133),
+        // which are the exact values the Meteor satellite's
+        // encoder uses on the wire. A future "simplification" back
+        // to the bit-reversed forms (0x4F / 0x6D) would silently
+        // break every over-the-air decode — this fires first.
+        assert_eq!(POLYA, 0x79, "G1 must be the on-wire 0o171");
+        assert_eq!(POLYB, 0x5B, "G2 must be the on-wire 0o133");
+    }
+
+    #[test]
+    fn ccsds_encode_matches_dbdexter_conv_encode_u32() {
+        // Our encoder must produce the SAME codeword as dbdexter's
+        // `conv_encode_u32` (meteor_decode/ecc/viterbi.c), i.e. the
+        // satellite's on-wire code. Reference algorithm:
+        //   state = (state>>1 | bit<<(K-1)) & (NUM_STATES-1)
+        //   out_pair = (parity(state&G1), parity(state&G2))
+        // We reproduce it here and assert pair-for-pair equality
+        // against ccsds_encode's soft output (sign 0 -> +, 1 -> -).
+        let conv_encode_u32 = |data: u32| -> Vec<(u8, u8)> {
+            let mut state: u8 = 0;
+            let mut out = Vec::with_capacity(32);
+            for i in (0..32).rev() {
+                let bit = ((data >> i) & 1) as u8;
+                state = ((state >> 1) | (bit << (K - 1) as u8)) & ((1 << K) - 1);
+                out.push((parity_8(state & POLYA), parity_8(state & POLYB)));
+            }
+            out
+        };
+        for &data in &[
+            0x1ACF_FC1D_u32,
+            0xDEAD_BEEF,
+            0x0000_0000,
+            0xFFFF_FFFF,
+            0x1234_5678,
+        ] {
+            let bits: Vec<u8> = (0..32).map(|i| ((data >> (31 - i)) & 1) as u8).collect();
+            let soft = ccsds_encode(&bits);
+            let reference = conv_encode_u32(data);
+            for (i, &(g1, g2)) in reference.iter().enumerate() {
+                // ccsds_encode emits g1 then g2, sign 0 -> +, 1 -> -.
+                let got_g1 = u8::from(soft[i * 2] < 0);
+                let got_g2 = u8::from(soft[i * 2 + 1] < 0);
+                assert_eq!(
+                    (got_g1, got_g2),
+                    (g1, g2),
+                    "data {data:#010x} symbol {i}: ccsds_encode disagrees with dbdexter conv_encode_u32",
+                );
+            }
+        }
     }
 }
 
