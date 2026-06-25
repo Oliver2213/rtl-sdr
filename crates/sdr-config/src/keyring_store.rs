@@ -62,8 +62,50 @@ impl KeyringStore {
 
     fn entry(&self, key: &str) -> Result<keyring::Entry, KeyringError> {
         keyring::Entry::new(&self.service, key).map_err(|e| match e {
-            keyring::Error::NoStorageAccess(_) => KeyringError::NoBackend,
+            // keyring 4 surfaces two "no usable backend" shapes, both of
+            // which should degrade to the in-memory/JSON fallback rather
+            // than hard-error: `NoStorageAccess` (a backend is registered
+            // but locked/unreachable) and the new `NoDefaultStore` (no
+            // platform store could be registered at all — e.g. a target
+            // without a compiled-in backend). Per #681.
+            keyring::Error::NoStorageAccess(_) | keyring::Error::NoDefaultStore => {
+                KeyringError::NoBackend
+            }
             other => KeyringError::Platform(other.to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// Real round-trip against the OS keyring — proves the keyring 4 `v1`
+    /// backend actually persists, the direct guard against the silent
+    /// no-op-store trap from PR #346 that `v1` auto-registration is meant
+    /// to prevent. `#[ignore]`d because CI runners have no Secret Service /
+    /// Keychain session; run locally with
+    /// `cargo test -p sdr-config -- --ignored`.
+    #[test]
+    #[ignore = "requires a real OS keyring (Secret Service / Keychain)"]
+    fn keyring_round_trip_against_real_backend() {
+        let store = KeyringStore::new("sdr-rs-keyring-selftest");
+        let key = "round-trip-probe-681";
+        let secret = "s3cr3t-value";
+
+        store.set(key, secret).expect("set on a real backend");
+        assert_eq!(
+            store.get(key).expect("get on a real backend").as_deref(),
+            Some(secret),
+            "value must persist and round-trip through the keyring",
+        );
+
+        store.delete(key).expect("delete on a real backend");
+        assert_eq!(
+            store.get(key).expect("get after delete"),
+            None,
+            "entry must be gone after delete",
+        );
     }
 }
