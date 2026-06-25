@@ -1,174 +1,244 @@
-//! Root-raised-cosine matched filter for Meteor LRPT QPSK.
+//! Polyphase interpolating root-raised-cosine matched filter for
+//! Meteor LRPT.
 //!
-//! Coefficients computed from the standard RRC formula at β = 0.6,
-//! span 31 symbols, 2 samples per symbol = 63 taps. Symmetric FIR
-//! with circular history buffer; normalized to unity DC gain.
+//! Faithful transliteration of dbdexter `meteor_demod/dsp/filter.c`
+//! (`filter_init_rrc`, `rrc_coeff`, `filter_fwd_sample`,
+//! `filter_get`). The filter is both the RRC matched filter AND the
+//! fractional-delay interpolator the Mueller-Muller timing loop
+//! steers: a single prototype of `taps*factor` coefficients is
+//! polyphase-decomposed into `factor` sub-filters, and
+//! [`RrcFilter::get`] evaluates sub-filter `phase` against the
+//! complex history to produce the interpolated, matched-filtered
+//! sample at that fractional offset.
 //!
 //! Reference (read-only): `original/meteor_demod/dsp/filter.c`
-//! (`filter_rrc_init`).
+//! and `original/meteor_demod/demod.h` (`RRC_ALPHA`, `RRC_ORDER`,
+//! `INTERP_FACTOR`).
 
 use core::f32::consts::PI;
 
 use sdr_types::Complex;
 
-/// Filter span in symbols. Combined with `SPS_FOR_TAP_COUNT`
-/// gives `NUM_TAPS = SPAN_SYMBOLS * sps + 1`.
-pub const SPAN_SYMBOLS: usize = 31;
+/// RRC design order. `meteor_demod/demod.h:12` (`RRC_ORDER 32`).
+pub const RRC_ORDER: usize = 32;
 
-/// Samples-per-symbol assumed at tap-design time. The runtime
-/// `samples_per_symbol` argument to `RrcFilter::new` must match
-/// this — the filter doesn't currently regenerate taps for other
-/// sps values (Meteor's chain is fixed at 2 sps).
-pub const SPS_FOR_TAP_COUNT: usize = 2;
+/// Polyphase interpolation factor. `meteor_demod/demod.h:13`
+/// (`INTERP_FACTOR 5`).
+pub const INTERP_FACTOR: usize = 5;
 
-/// Number of filter taps. Odd-length so the filter has a single
-/// peak tap; derived from span + sps so a future tap-count tweak
-/// can't drift away from the documented relationship.
-pub const NUM_TAPS: usize = SPAN_SYMBOLS * SPS_FOR_TAP_COUNT + 1;
+/// Per-phase sub-filter length: `order*2+1`. `filter.c:12`
+/// (`taps = order*2+1`). 65 taps.
+pub const NUM_TAPS: usize = RRC_ORDER * 2 + 1;
 
-/// Symbol-rate rolloff factor for Meteor LRPT (β).
+/// Prototype length: `taps*factor`. `filter.c:15,20`. 325 coeffs,
+/// laid out as `factor` contiguous sub-filters of `NUM_TAPS` each.
+pub const NUM_COEFFS: usize = NUM_TAPS * INTERP_FACTOR;
+
+/// Symbol-rate rolloff factor β. `meteor_demod/demod.h:8`
+/// (`RRC_ALPHA 0.6`).
 pub const ROLLOFF: f32 = 0.6;
 
-/// Root-raised-cosine FIR matched filter. Single-channel, complex
-/// in/out (the QPSK signal is complex baseband).
+/// Polyphase RRC matched filter / fractional-delay interpolator.
+/// Complex baseband in, complex out (one [`RrcFilter::get`] per
+/// polyphase phase after each [`RrcFilter::push`]).
 pub struct RrcFilter {
-    taps: [f32; NUM_TAPS],
-    history: [Complex; NUM_TAPS],
-    write_idx: usize,
+    /// `factor` sub-filters of [`NUM_TAPS`] coefficients each, in
+    /// sub-filter-major order (`coeffs[subfilter*NUM_TAPS + tap]`),
+    /// matching `filter.c:20` `coeffs[j*taps + i]`.
+    coeffs: [f32; NUM_COEFFS],
+    /// Circular history of the last [`NUM_TAPS`] input samples
+    /// (`filter.c` `flt->mem`).
+    mem: [Complex; NUM_TAPS],
+    /// Write cursor into `mem` (`filter.c` `flt->idx`).
+    idx: usize,
 }
 
 impl RrcFilter {
-    /// Build the RRC filter at `samples_per_symbol` (typically 2
-    /// for the standard 2 sps QPSK chain).
+    /// Build the polyphase RRC at oversampling factor `osf`
+    /// (= input `samplerate / symrate`). Transliterates
+    /// `filter_init_rrc` (`filter.c:9-28`): the prototype is
+    /// evaluated at `osf*factor` and decomposed into `factor`
+    /// phases.
     #[must_use]
     #[allow(
         clippy::cast_precision_loss,
-        clippy::cast_possible_wrap,
-        clippy::cast_possible_truncation,
-        reason = "tap-design indices are bounded by NUM_TAPS = 63; \
-                  centered loop variable fits trivially in i32 / f32"
+        reason = "INTERP_FACTOR (= 5) converts to f32 exactly"
     )]
-    pub fn new(samples_per_symbol: usize) -> Self {
-        // Defensive guard: rrc_impulse divides by samples_per_symbol.
-        // Today's only caller (`LrptDemod::new`) hardcodes 2, but the
-        // constructor is `pub` so a future caller could pass 0.
-        debug_assert!(samples_per_symbol > 0, "samples_per_symbol must be > 0");
-        let mut taps = [0.0_f32; NUM_TAPS];
-        let mid = (NUM_TAPS / 2) as i32;
-        for (i, tap) in taps.iter_mut().enumerate() {
-            let centered = i as i32 - mid;
-            let t = centered as f32 / samples_per_symbol as f32;
-            *tap = rrc_impulse(t, ROLLOFF);
-        }
-        // Normalize to unity DC gain (sum of taps = 1) so the
-        // filter doesn't change the signal's average magnitude.
-        let sum: f32 = taps.iter().sum();
-        if sum.abs() > 1e-6 {
-            for tap in &mut taps {
-                *tap /= sum;
+    pub fn new(osf: f32) -> Self {
+        let mut coeffs = [0.0_f32; NUM_COEFFS];
+        // filter.c:18-22 — coeffs[j*taps + i] = rrc_coeff(i*factor + j,
+        //                   taps*factor, osf*factor, alpha)
+        for j in 0..INTERP_FACTOR {
+            for i in 0..NUM_TAPS {
+                coeffs[j * NUM_TAPS + i] = rrc_coeff(
+                    i * INTERP_FACTOR + j,
+                    NUM_COEFFS,
+                    osf * INTERP_FACTOR as f32,
+                    ROLLOFF,
+                );
             }
         }
         Self {
-            taps,
-            history: [Complex::new(0.0, 0.0); NUM_TAPS],
-            write_idx: 0,
+            coeffs,
+            mem: [Complex::new(0.0, 0.0); NUM_TAPS],
+            idx: 0,
         }
     }
 
-    /// Process one complex sample. Returns the filtered sample.
-    pub fn process(&mut self, x: Complex) -> Complex {
-        self.history[self.write_idx] = x;
-        self.write_idx = (self.write_idx + 1) % NUM_TAPS;
-        let mut acc = Complex::new(0.0, 0.0);
-        for i in 0..NUM_TAPS {
-            let idx = (self.write_idx + i) % NUM_TAPS;
-            acc += self.history[idx] * self.taps[NUM_TAPS - 1 - i];
+    /// Push one input sample into the circular history.
+    /// Transliterates `filter_fwd_sample` (`filter.c:38-43`).
+    pub fn push(&mut self, sample: Complex) {
+        self.mem[self.idx] = sample;
+        self.idx += 1;
+        self.idx %= NUM_TAPS;
+    }
+
+    /// Evaluate polyphase sub-filter for `phase` (0..[`INTERP_FACTOR`])
+    /// against the current history. Transliterates `filter_get`
+    /// (`filter.c:45-65`), including the sub-filter phase reversal
+    /// `(interp_factor - phase - 1)` and the two-chunk circular walk
+    /// starting at `idx`.
+    pub fn get(&self, phase: usize) -> Complex {
+        let mut result = Complex::new(0.0, 0.0);
+        // filter.c:52 — j = (interp_factor - phase - 1) * size
+        let mut j = (INTERP_FACTOR - phase - 1) * NUM_TAPS;
+        // filter.c:55-57 — chunk 1: current position to end
+        for i in self.idx..NUM_TAPS {
+            result += self.mem[i] * self.coeffs[j];
+            j += 1;
         }
-        acc
+        // filter.c:60-62 — chunk 2: start to current position - 1
+        for i in 0..self.idx {
+            result += self.mem[i] * self.coeffs[j];
+            j += 1;
+        }
+        result
     }
 }
 
-/// Continuous-time RRC impulse response. Handles the t = 0 and
-/// t = ±T / (4β) singularities by L'Hopital expansion (which the
-/// C reference also does).
+/// Variable-alpha RRC filter coefficient. Faithful transliteration
+/// of `rrc_coeff` (`filter.c:70-94`); formula from
+/// <https://www.michael-joost.de/rrcfilter.pdf>. Applies the
+/// (mislabeled-"Hamming"-in-C, actually **Blackman**) window
+/// 0.42 / −0.5 / 0.08 and the fixed `norm = 2/5` scalar.
+///
+/// `stage_no` is the **absolute prototype tap index** (0..`taps`),
+/// `taps` the prototype length, `osf` the prototype oversampling
+/// (`samplerate/symrate × factor`).
 #[allow(
-    clippy::float_cmp,
-    reason = "comparing exact-zero and exact-singularity values is intentional"
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    reason = "stage_no/taps are small filter indices (< 325); the f32/i32 \
+              conversions are exact in this range"
 )]
-fn rrc_impulse(t: f32, beta: f32) -> f32 {
-    if t.abs() < 1e-6 {
-        return 1.0 - beta + 4.0 * beta / PI;
+fn rrc_coeff(stage_no: usize, taps: usize, osf: f32, alpha: f32) -> f32 {
+    // filter.c:73 — const float norm = 2.0/5.0;
+    const NORM: f32 = 2.0 / 5.0;
+    // filter.c:79 — order = (taps - 1)/2;
+    let order = (taps - 1) / 2;
+
+    // filter.c:81-84 — handle the 0/0 case (center tap).
+    if order == stage_no {
+        return NORM * (1.0 - alpha + 4.0 * alpha / PI);
     }
-    let denom_singular = (4.0 * beta * t).powi(2);
-    if (denom_singular - 1.0).abs() < 1e-6 {
-        let s = (PI / (4.0 * beta)).sin();
-        let c = (PI / (4.0 * beta)).cos();
-        return (beta / 2.0_f32.sqrt()) * ((1.0 + 2.0 / PI) * s + (1.0 - 2.0 / PI) * c);
-    }
-    let num = (PI * t * (1.0 - beta)).sin() + 4.0 * beta * t * (PI * t * (1.0 + beta)).cos();
-    let den = PI * t * (1.0 - denom_singular);
-    num / den
+
+    // filter.c:86 — t = abs(order - stage_no)/osf;  (integer abs, then /osf)
+    let t = (order as i32 - stage_no as i32).unsigned_abs() as f32 / osf;
+    // filter.c:87 — coeff = sin(πt(1-α)) + 4αt·cos(πt(1+α));
+    let mut coeff =
+        (PI * t * (1.0 - alpha)).sin() + 4.0 * alpha * t * (PI * t * (1.0 + alpha)).cos();
+    // filter.c:88 — interm = πt(1 - (4αt)^2);
+    let interm = PI * t * (1.0 - (4.0 * alpha * t) * (4.0 * alpha * t));
+
+    // filter.c:91 — Blackman window keyed on the absolute index stage_no.
+    let taps_m1 = (taps - 1) as f32;
+    coeff *= 0.42 - 0.5 * (2.0 * PI * stage_no as f32 / taps_m1).cos()
+        + 0.08 * (4.0 * PI * stage_no as f32 / taps_m1).cos();
+
+    // filter.c:93 — return coeff / interm * norm;
+    coeff / interm * NORM
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "test code converts small filter-size constants to f32; exact in range"
+)]
 mod tests {
     use super::*;
 
+    /// The center prototype tap (`stage_no` == order) must equal
+    /// `norm·(1 - α + 4α/π)`. Cross-checked against the C reference
+    /// value 0.46557748 for α=0.6.
     #[test]
-    fn rrc_taps_are_symmetric() {
-        let f = RrcFilter::new(2);
-        for i in 0..(NUM_TAPS / 2) {
-            let a = f.taps[i];
-            let b = f.taps[NUM_TAPS - 1 - i];
+    fn center_tap_matches_c_reference() {
+        // Prototype is NUM_COEFFS=325 long; center index = 162.
+        let c = rrc_coeff(
+            NUM_COEFFS / 2,
+            NUM_COEFFS,
+            2.0 * INTERP_FACTOR as f32,
+            ROLLOFF,
+        );
+        let expected = (2.0 / 5.0) * (1.0 - 0.6 + 4.0 * 0.6 / PI);
+        assert!(
+            (c - expected).abs() < 1e-6,
+            "center tap {c} != expected {expected}",
+        );
+        assert!(
+            (c - 0.465_577_5).abs() < 1e-4,
+            "center tap {c} should match C reference 0.4655775",
+        );
+    }
+
+    /// The full 325-tap prototype sums to ~4.0 (= `INTERP_FACTOR` ×
+    /// the 0.8 DC gain of the equivalent factor=1 65-tap filter the
+    /// C reference's non-interpolating config produces), confirming
+    /// the window and `norm = 2/5` are applied correctly across all
+    /// 325 prototype taps.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn prototype_sum_matches_c_reference() {
+        let osf = 2.0 * INTERP_FACTOR as f32;
+        let sum: f32 = (0..NUM_COEFFS)
+            .map(|n| rrc_coeff(n, NUM_COEFFS, osf, ROLLOFF))
+            .sum();
+        assert!(
+            (sum - INTERP_FACTOR as f32 * 0.8).abs() < 1e-2,
+            "prototype coefficient sum {sum} should be ~{} (5 × 0.8)",
+            INTERP_FACTOR as f32 * 0.8,
+        );
+    }
+
+    /// Each polyphase sub-filter is symmetric only as a whole
+    /// prototype; here we pin that the edge prototype taps are
+    /// near-zero (windowed), matching C tap[0] ≈ 9.6e-22.
+    #[test]
+    fn prototype_edges_are_windowed_to_near_zero() {
+        let osf = 2.0 * INTERP_FACTOR as f32;
+        let t0 = rrc_coeff(0, NUM_COEFFS, osf, ROLLOFF);
+        assert!(
+            t0.abs() < 1e-3,
+            "edge tap {t0} should be windowed near zero"
+        );
+    }
+
+    /// A populated history yields a finite, non-NaN filtered output
+    /// for every polyphase phase.
+    #[test]
+    fn get_is_finite_for_all_phases() {
+        let mut f = RrcFilter::new(2.0);
+        for n in 0..NUM_TAPS {
+            #[allow(clippy::cast_precision_loss)]
+            let v = (n as f32 * 0.1).sin();
+            f.push(Complex::new(v, -v));
+        }
+        for phase in 0..INTERP_FACTOR {
+            let out = f.get(phase);
             assert!(
-                (a - b).abs() < 1e-5,
-                "RRC taps must be symmetric: tap[{i}]={a}, tap[{}]={b}",
-                NUM_TAPS - 1 - i,
+                out.re.is_finite() && out.im.is_finite(),
+                "phase {phase} non-finite"
             );
         }
-    }
-
-    #[test]
-    fn rrc_passes_dc_with_unity_gain() {
-        let mut f = RrcFilter::new(2);
-        let mut last = Complex::new(0.0, 0.0);
-        for _ in 0..200 {
-            last = f.process(Complex::new(1.0, 0.0));
-        }
-        assert!(
-            (last.re - 1.0).abs() < 1e-3,
-            "DC response should be unity, got {}",
-            last.re,
-        );
-        assert!(last.im.abs() < 1e-3, "DC response imag should be 0");
-    }
-
-    #[test]
-    fn rrc_attenuates_at_symbol_rate() {
-        // A tone at the symbol rate (alternating ±1 at 2 sps)
-        // sits beyond the rolloff region for β=0.6 and should be
-        // heavily attenuated.
-        let mut f = RrcFilter::new(2);
-        let mut max_after_settle = 0.0_f32;
-        for n in 0..400 {
-            let phase = PI * n as f32; // alternating ±1
-            let s = Complex::new(phase.cos(), 0.0);
-            let out = f.process(s);
-            if n > NUM_TAPS {
-                max_after_settle = max_after_settle.max(out.re.abs());
-            }
-        }
-        assert!(
-            max_after_settle < 0.2,
-            "RRC should attenuate symbol-rate tone, got peak {max_after_settle}",
-        );
-    }
-
-    #[test]
-    fn span_symbols_matches_num_taps() {
-        // Pin the relationship so a future tap-count tweak doesn't
-        // silently break the convolution loop.
-        assert_eq!(NUM_TAPS, SPAN_SYMBOLS * SPS_FOR_TAP_COUNT + 1);
     }
 }

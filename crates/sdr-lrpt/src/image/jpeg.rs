@@ -346,15 +346,18 @@ impl JpegDecoder {
     }
 }
 
-/// Lower bound (exclusive) of the Meteor JPEG quality band that
-/// uses the `5000 / qf` scaling rule. Below or at this threshold
-/// the linear `200 - 2 * qf` rule applies instead.
-const QUALITY_HYPERBOLIC_MIN: f32 = 20.0;
-/// Upper bound (exclusive) of the same hyperbolic band. At or
-/// above this quality the linear rule takes over again.
+/// Quality threshold separating the two scaling rules. For
+/// `qf < 50` the hyperbolic `5000 / qf` rule applies; for
+/// `qf >= 50` the linear `200 - 2 * qf` rule does. Per dbdexter
+/// `jpeg.c::quantization` (`if (quality < 50) ... else ...`) — note
+/// there is **no** lower bound: a previous revision gated the
+/// hyperbolic branch on `qf > 20` as well, which mis-scaled every
+/// low-quality (qf ≤ 20) packet onto the linear rule. Quality 0 is
+/// guarded upstream (`fill_dqt` is only called for non-zero
+/// quality), so `5000 / qf` never divides by zero.
 const QUALITY_HYPERBOLIC_MAX: f32 = 50.0;
 /// Numerator of the hyperbolic quality rule: `f = HYP_NUM / qf`
-/// for qf ∈ (`QUALITY_HYPERBOLIC_MIN`, `QUALITY_HYPERBOLIC_MAX`).
+/// for `qf < QUALITY_HYPERBOLIC_MAX`.
 const QUALITY_HYPERBOLIC_NUM: f32 = 5000.0;
 /// Constant term of the linear quality rule: `f = LIN_BASE - LIN_SLOPE * qf`.
 const QUALITY_LINEAR_BASE: f32 = 200.0;
@@ -373,7 +376,7 @@ const QUALITY_MIN_DQT: f32 = 1.0;
 /// same `Dqt` to every MCU in that packet.
 pub fn fill_dqt(q: u8) -> Dqt {
     let qf = f32::from(q);
-    let f = if qf > QUALITY_HYPERBOLIC_MIN && qf < QUALITY_HYPERBOLIC_MAX {
+    let f = if qf < QUALITY_HYPERBOLIC_MAX {
         QUALITY_HYPERBOLIC_NUM / qf
     } else {
         QUALITY_LINEAR_BASE - QUALITY_LINEAR_SLOPE * qf

@@ -35,3 +35,7 @@ apps/macos/build/
 # LLVM code-coverage intermediates dropped in the cwd by
 # xcodebuild test runs and by clang/swift instrumentation.
 *.profraw
+
+# Local LRPT/satellite test recordings (large IQ/.s binaries + reference
+# images). Preserved on disk for decode validation; never committed.
+/test-data/

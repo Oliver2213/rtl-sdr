@@ -14,39 +14,52 @@
 //! at every CADU boundary.
 //!
 //! Reference (read-only): `original/medet/met_to_data.pas`
-//! (the `prand` table at the top of the file). To independently
-//! validate the table against the spec polynomial, the canonical
-//! reference is `libfec`'s `Bp[]` in `viterbi27.c` — both produce
-//! the same bytes (different LFSR-direction conventions can yield
-//! visually-different tables that are equivalent mod sequence
-//! ordering, so direct byte comparison against `libfec` is the
-//! cleanest cross-check).
+//! (the `prand` table at the top of the file) and dbdexter's
+//! `meteor_decode/ecc/descramble.c` (`descramble_init`), which
+//! generate the same 255-byte sequence two different ways.
+//!
+//! We do **not** hard-code the table: a hand-transcribed 255-byte
+//! array is exactly how a silent corruption crept into an earlier
+//! revision (51 wrong bytes from byte 82 on, which derandomized
+//! every CADU into garbage and made over-the-air decoding
+//! impossible). Instead [`generate_pn_table`] reproduces the spec
+//! LFSR at compile time — it is a direct transliteration of
+//! dbdexter's `descramble_init`, so the bytes are guaranteed
+//! correct by construction and can never drift again.
 
 /// Length of the CCSDS PN sequence (one period).
 pub const PN_PERIOD: usize = 255;
 
-/// CCSDS PN table, copied verbatim from `medet/met_to_data.pas`.
-/// This is the canonical reference for what's on the wire; see
-/// the module-level doc for cross-validation guidance against
-/// `libfec`'s reference table.
-const PN_TABLE: [u8; PN_PERIOD] = [
-    0xff, 0x48, 0x0e, 0xc0, 0x9a, 0x0d, 0x70, 0xbc, 0x8e, 0x2c, 0x93, 0xad, 0xa7, 0xb7, 0x46, 0xce,
-    0x5a, 0x97, 0x7d, 0xcc, 0x32, 0xa2, 0xbf, 0x3e, 0x0a, 0x10, 0xf1, 0x88, 0x94, 0xcd, 0xea, 0xb1,
-    0xfe, 0x90, 0x1d, 0x81, 0x34, 0x1a, 0xe1, 0x79, 0x1c, 0x59, 0x27, 0x5b, 0x4f, 0x6e, 0x8d, 0x9c,
-    0xb5, 0x2e, 0xfb, 0x98, 0x65, 0x45, 0x7e, 0x7c, 0x14, 0x21, 0xe3, 0x11, 0x29, 0x9b, 0xd5, 0x63,
-    0xfd, 0x20, 0x3b, 0x02, 0x68, 0x35, 0xc2, 0xf2, 0x38, 0xb2, 0x4e, 0xb6, 0x9e, 0xdd, 0x1b, 0x39,
-    0x6a, 0x5d, 0xf6, 0x30, 0xca, 0x8a, 0xfc, 0xf8, 0x28, 0x43, 0xc6, 0x22, 0x53, 0x37, 0xaa, 0xc7,
-    0xfa, 0x40, 0x76, 0x04, 0xd0, 0x6b, 0x85, 0xe4, 0x71, 0x64, 0x9d, 0x6d, 0x3d, 0xba, 0x36, 0x72,
-    0xd5, 0xbb, 0xec, 0x61, 0x95, 0x15, 0xf9, 0xf0, 0x50, 0x87, 0x8c, 0x44, 0xa6, 0x6f, 0x55, 0x8f,
-    0xf4, 0x80, 0xec, 0x09, 0xa0, 0xd7, 0x0b, 0xc8, 0xe2, 0xc8, 0x3a, 0xda, 0x7b, 0x74, 0x6c, 0xe4,
-    0xab, 0x37, 0xd2, 0xc3, 0x2a, 0x2b, 0xf3, 0xe1, 0xa1, 0x0f, 0x18, 0x89, 0x4c, 0xde, 0xab, 0x1f,
-    0xe9, 0x01, 0xd8, 0x13, 0x41, 0xae, 0x17, 0x91, 0xc5, 0x90, 0x75, 0xb4, 0xf7, 0x68, 0xd9, 0xc8,
-    0x57, 0x6f, 0xa4, 0x86, 0x55, 0x57, 0xe6, 0xc3, 0x42, 0x1e, 0x31, 0x12, 0x99, 0xbd, 0x56, 0x3f,
-    0xd2, 0x03, 0xb0, 0x26, 0x83, 0x5c, 0x2f, 0x23, 0x8b, 0x21, 0xea, 0x68, 0xef, 0xd1, 0xb2, 0x91,
-    0xae, 0xdf, 0x49, 0x0c, 0xab, 0xae, 0xcd, 0x86, 0x84, 0x3c, 0x62, 0x25, 0x33, 0x7a, 0xad, 0x7e,
-    0xa4, 0x07, 0x60, 0x4d, 0x06, 0xb8, 0x5e, 0x46, 0x16, 0x42, 0xd5, 0xd0, 0xde, 0xa2, 0x65, 0x22,
-    0x5d, 0xbf, 0x92, 0x18, 0x57, 0x5d, 0x9b, 0x0c, 0x08, 0x79, 0xc4, 0x4a, 0x66, 0xf5, 0x5b,
-];
+/// Generate the CCSDS PN sequence from the spec LFSR at compile
+/// time. Polynomial h(x) = x^8 + x^7 + x^5 + x^3 + 1 (feedback
+/// taps at bits 7, 5, 3, 0), seeded with all ones. Each output
+/// byte takes the register LSB MSB-first across 8 shifts. This is
+/// a byte-for-byte transliteration of dbdexter's `descramble_init`
+/// (`meteor_decode/ecc/descramble.c`); see the module docs for why
+/// it is generated rather than tabulated.
+const fn generate_pn_table() -> [u8; PN_PERIOD] {
+    let mut table = [0_u8; PN_PERIOD];
+    let mut state: u8 = 0xff;
+    let mut i = 0;
+    while i < PN_PERIOD {
+        let mut byte: u8 = 0;
+        let mut bit = 0;
+        while bit < 8 {
+            let newbit = ((state >> 7) & 1) ^ ((state >> 5) & 1) ^ ((state >> 3) & 1) ^ (state & 1);
+            byte = (byte << 1) | (state & 1);
+            state = (state >> 1) | (newbit << 7);
+            bit += 1;
+        }
+        table[i] = byte;
+        i += 1;
+    }
+    table
+}
+
+/// CCSDS PN table, generated from the spec LFSR (see
+/// [`generate_pn_table`]). Matches medet's `prand` and dbdexter's
+/// `descramble_init` byte-for-byte.
+const PN_TABLE: [u8; PN_PERIOD] = generate_pn_table();
 
 /// Streaming de-randomizer. Stateful position counter; XORs each
 /// input byte against the pre-computed PN table.
@@ -98,6 +111,33 @@ mod tests {
         // every reference implementation.
         assert_eq!(PN_TABLE[0], 0xFF, "first PN byte");
         assert_eq!(PN_TABLE[1], 0x48, "second PN byte");
+    }
+
+    #[test]
+    fn pn_table_matches_authoritative_sequence() {
+        // Spot-check bytes against the canonical sequence produced
+        // by dbdexter's `descramble_init` and medet's `prand`. The
+        // chosen indices include the exact bytes a prior revision
+        // corrupted (82, 137, 143, 175, 254) — if the LFSR taps or
+        // direction ever regress, these fire immediately.
+        const CHECKS: &[(usize, u8)] = &[
+            (0, 0xff),
+            (1, 0x48),
+            (7, 0xbc),
+            (82, 0xf7),
+            (137, 0xc9),
+            (143, 0xe5),
+            (175, 0xcb),
+            (242, 0xe6),
+            (254, 0x58),
+        ];
+        for &(idx, want) in CHECKS {
+            assert_eq!(
+                PN_TABLE[idx], want,
+                "PN byte {idx} = {:#04x}, expected {want:#04x}",
+                PN_TABLE[idx],
+            );
+        }
     }
 
     #[test]
