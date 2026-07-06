@@ -75,5 +75,12 @@ libc.workspace = true
 sdr-acars.workspace = true
 arrayvec.workspace = true
 
+# Vendor libusb into libsdr_ffi.a so xcodebuild's static link of the
+# archive is self-contained. Without this, Homebrew libusb makes
+# libusb1-sys link dynamically and the SwiftUI app fails with
+# undefined `_libusb_*` symbols. Linux keeps the system libusb.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusb = { workspace = true, features = ["vendored"] }
+
 [lints]
 workspace = true

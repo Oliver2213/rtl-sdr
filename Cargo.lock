@@ -3258,6 +3258,7 @@ dependencies = [
  "arrayvec",
  "libc",
  "librtlsdr-rs",
+ "rusb",
  "sdr-acars",
  "sdr-config",
  "sdr-core",
