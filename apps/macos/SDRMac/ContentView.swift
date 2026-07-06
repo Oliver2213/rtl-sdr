@@ -155,6 +155,13 @@ struct ContentView: View {
         .sheet(isPresented: $showingRadioReference) {
             RadioReferenceDialog()
         }
+        // Add Bookmark sheet — presented from the toolbar button,
+        // the Bookmarks ▸ Add Bookmark… menu command (⌘D), and
+        // the Bookmarks-panel header "+", all via the shared
+        // `model.showingAddBookmark` flag.
+        .sheet(isPresented: $model.showingAddBookmark) {
+            AddBookmarkSheet()
+        }
         // Re-sync the RadioReference credentials flag whenever
         // the main window becomes active. Handles the case where
         // something outside the app's Settings flow changed the

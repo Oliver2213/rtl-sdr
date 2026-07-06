@@ -664,6 +664,15 @@ final class CoreModel {
     /// highlight immediately. Per issue #339.
     var activeBookmarkId: UUID? = nil
 
+    /// Transient UI flag: `true` while the "Add Bookmark" sheet
+    /// is presented. Lives here (not on a single view) so all
+    /// three entry points — the toolbar button, the
+    /// `Bookmarks ▸ Add Bookmark…` menu command (⌘D), and the
+    /// Bookmarks-panel "+" — drive one shared presentation
+    /// state. Not persisted and not engine-facing; grouped with
+    /// `activeBookmarkId` since both are bookmark UI state.
+    var showingAddBookmark: Bool = false
+
     /// Active audio-recording state. `nil` = not recording,
     /// `some(path)` = engine confirmed it opened `path` for
     /// writing. Mirrors `DspToUi::AudioRecordingStarted/Stopped`

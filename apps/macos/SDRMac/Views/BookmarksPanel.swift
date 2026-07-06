@@ -3,17 +3,17 @@
 // saved tuning profiles (#339).
 //
 // Mirrors the Linux GTK `bookmarks_panel.rs` layout: a 360pt
-// wide column with a header (title + close button), a search
-// row, a scrolling list of bookmark rows grouped by category
-// via `DisclosureGroup`, and an empty-state caption when no
-// bookmarks are saved. The sidebar's `BookmarksSection` keeps
-// only the quick-add affordance (name entry + Save button) —
-// browse / search / manage all live here.
+// wide column with a header (title + add "+" + close buttons), a
+// search row, a scrolling list of bookmark rows grouped by
+// category via `DisclosureGroup`, and an empty-state caption
+// when no bookmarks are saved. Adding is via the header "+", the
+// toolbar bookmark button, or the Bookmarks ▸ Add Bookmark…
+// menu command (⌘D) — all open `AddBookmarkSheet`; browse /
+// search / manage live here.
 //
-// Toggled from the header toolbar bookmark button or `⌘B`.
-// Mutual-exclusive with the transcription panel (the sidebar
-// has room for one right-side flyout at a time). Open/closed
-// state persists across launches via `UserDefaults`.
+// Shown as the right activity bar's Bookmarks slot (⌘⇧2).
+// Selecting a different right activity hides it; open/closed
+// state persists via the shared sidebar session config.
 
 import SwiftUI
 // `DemodMode.label` lives in SdrCoreKit — used by the row
@@ -172,6 +172,21 @@ struct BookmarksPanel: View {
             Text("Bookmarks")
                 .font(.headline)
             Spacer()
+            // In-panel add affordance — opens the same Add
+            // Bookmark sheet as the toolbar button and the
+            // Bookmarks ▸ Add Bookmark… menu command, so a user
+            // looking at the (possibly empty) list has an obvious
+            // way to save the current tuning without hunting for
+            // the toolbar.
+            Button {
+                model.showingAddBookmark = true
+            } label: {
+                Image(systemName: "plus")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Add Bookmark (⌘D)")
+            .accessibilityLabel("Add Bookmark")
             Button {
                 isPresented = false
             } label: {
@@ -347,7 +362,7 @@ struct BookmarksPanel: View {
                 .foregroundStyle(.secondary)
             Text(
                 kind == .empty
-                    ? "Save the current tuning from the sidebar to start a list."
+                    ? "Tune to a station, then click + above (or press ⌘D) to save it here."
                     : "No bookmarks match \"\(filterText)\"."
             )
             .font(.caption)

@@ -50,6 +50,23 @@ struct HeaderToolbar: ToolbarContent {
         // Click the matching activity-bar icon to open or close
         // each panel.
 
+        // Add Bookmark — saves the current tuning. Distinct from
+        // the right activity bar's bookmark icon (which shows the
+        // list): this is the *action*, so the glyph is
+        // "bookmark.fill" and the tooltip names it. Flips the
+        // shared `showingAddBookmark` flag the sheet binds to.
+        // `Label` (not a bare `Image`) for the same toolbar
+        // display-mode robustness the RadioReference button
+        // relies on below.
+        ToolbarItem(placement: .automatic) {
+            Button {
+                model.showingAddBookmark = true
+            } label: {
+                Label("Add Bookmark", systemImage: "bookmark.fill")
+            }
+            .help("Add Bookmark (⌘D)")
+        }
+
         // RadioReference button — mirrors the GTK header-bar
         // entry point.
         //

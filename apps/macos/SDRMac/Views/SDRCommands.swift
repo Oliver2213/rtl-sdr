@@ -36,6 +36,22 @@ struct SDRCommands: Commands {
             .disabled(core.centerFrequencyHz < 100_000)
         }
 
+        CommandMenu("Bookmarks") {
+            // Ellipsis: the command opens the Add Bookmark sheet
+            // to collect a name/category before it executes.
+            Button("Add Bookmark…") { core.showingAddBookmark = true }
+                .keyboardShortcut("d", modifiers: .command)
+            Divider()
+            // Reveal the Bookmarks panel (right activity bar
+            // slot 2, ⌘⇧2). Same target the activity-bar icon
+            // drives, surfaced here so the command is findable in
+            // the menu bar too.
+            Button("Show Bookmarks") {
+                core.setSidebarRightSelected(RightActivity.bookmarks.rawValue)
+                core.setSidebarRightOpen(true)
+            }
+        }
+
         CommandGroup(after: .toolbar) {
             Button("Toggle Sidebar") {
                 NSApp.keyWindow?.firstResponder?.tryToPerform(
