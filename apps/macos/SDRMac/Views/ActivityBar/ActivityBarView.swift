@@ -127,11 +127,13 @@ private struct ActivityBarButton<Activity: ActivityEntry>: View {
                 .foregroundStyle(isSelected ? Color.accentColor : .primary)
         }
         .buttonStyle(.plain)
-        // Pass the shortcut as an optional `KeyboardShortcut?`
-        // so an out-of-range `shortcutIndex` (>9) registers no
-        // shortcut at all rather than silently binding the Tab
-        // key. Per `CodeRabbit` round 2 on PR #491.
-        .keyboardShortcut(keyboardShortcut)
+        // NOTE: the ⌘1–6 / ⌘⇧1–2 accelerators are NOT registered
+        // here — they live on the View-menu Toggle items in
+        // `SDRCommands` so each shortcut has a single owner (a
+        // menu command and a button both binding the same key
+        // conflict). This button stays a click accelerator; the
+        // `keyboardShortcut` computed value below is used only to
+        // render the shortcut hint in the tooltip.
         .help(helpText)
         .accessibilityLabel(helpText)
         // Surface the active state to VoiceOver. The visual
