@@ -8,7 +8,7 @@
 // category via `DisclosureGroup`, and an empty-state caption
 // when no bookmarks are saved. Adding is via the header "+", the
 // toolbar bookmark button, or the Bookmarks ▸ Add Bookmark…
-// menu command (⌘D) — all open `AddBookmarkSheet`; browse /
+// menu command (⌘D) — all open `BookmarkEditorSheet`; browse /
 // search / manage live here.
 //
 // Shown as the right activity bar's Bookmarks slot (⌘⇧2).
@@ -179,7 +179,7 @@ struct BookmarksPanel: View {
             // way to save the current tuning without hunting for
             // the toolbar.
             Button {
-                model.showingAddBookmark = true
+                model.bookmarkEditor = .add
             } label: {
                 Image(systemName: "plus")
                     .foregroundStyle(.secondary)
@@ -492,15 +492,51 @@ struct BookmarkListRow: View {
             .help("Delete bookmark")
             .accessibilityLabel("Delete bookmark")
         }
-        // Right-click context menu — second surface for
-        // delete, matches the pre-refactor sidebar behavior.
+        // Right-click context menu — full per-row action set:
+        // recall, edit, refresh-from-current-tuning, delete. The
+        // trailing icon buttons cover the frequent toggles; this
+        // menu is where the less-frequent management actions live.
         .contextMenu {
+            Button {
+                model.apply(bookmark)
+            } label: {
+                Label("Tune to Bookmark", systemImage: "target")
+            }
+            Divider()
+            Button {
+                model.bookmarkEditor = .edit(bookmark)
+            } label: {
+                Label("Edit…", systemImage: "pencil")
+            }
+            Button {
+                updateTuningToCurrent()
+            } label: {
+                Label("Update Tuning to Current", systemImage: "arrow.clockwise")
+            }
+            Divider()
             Button(role: .destructive) {
                 store.remove(id: bookmark.id)
             } label: {
                 Label("Delete", systemImage: "trash")
             }
         }
+    }
+
+    /// Overwrite this bookmark's tuning fields with the engine's
+    /// current tuning, keeping its identity (id / name / category)
+    /// and scanner membership. The Mac counterpart of the Linux
+    /// "save over active" affordance. Re-snapshots via
+    /// `snapshotBookmark` so the captured field set stays in lock-
+    /// step with the Add path, then grafts the preserved identity
+    /// back on before handing to `store.update` (which matches by
+    /// id and refreshes `updatedAt`).
+    private func updateTuningToCurrent() {
+        var snapshot = model.snapshotBookmark(name: bookmark.name)
+        snapshot.id = bookmark.id
+        snapshot.rrCategory = bookmark.rrCategory
+        snapshot.scanEnabled = bookmark.scanEnabled
+        snapshot.priority = bookmark.priority
+        store.update(snapshot)
     }
 
     private var isActive: Bool {

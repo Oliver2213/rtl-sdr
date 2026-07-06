@@ -664,14 +664,16 @@ final class CoreModel {
     /// highlight immediately. Per issue #339.
     var activeBookmarkId: UUID? = nil
 
-    /// Transient UI flag: `true` while the "Add Bookmark" sheet
-    /// is presented. Lives here (not on a single view) so all
-    /// three entry points — the toolbar button, the
-    /// `Bookmarks ▸ Add Bookmark…` menu command (⌘D), and the
-    /// Bookmarks-panel "+" — drive one shared presentation
-    /// state. Not persisted and not engine-facing; grouped with
+    /// Transient UI state driving the add/edit bookmark sheet:
+    /// `nil` when closed, `.add` for a new bookmark, `.edit(_)`
+    /// for an existing one. Lives here (not on a single view) so
+    /// every entry point — the toolbar button, the
+    /// `Bookmarks ▸ Add Bookmark…` menu command (⌘D), the
+    /// Bookmarks-panel "+", and a row's "Edit…" context-menu item
+    /// — drives one `.sheet(item:)` in `ContentView`. Not
+    /// persisted and not engine-facing; grouped with
     /// `activeBookmarkId` since both are bookmark UI state.
-    var showingAddBookmark: Bool = false
+    var bookmarkEditor: BookmarkEditorMode? = nil
 
     /// Active audio-recording state. `nil` = not recording,
     /// `some(path)` = engine confirmed it opened `path` for

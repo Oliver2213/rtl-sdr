@@ -53,14 +53,14 @@ struct HeaderToolbar: ToolbarContent {
         // Add Bookmark — saves the current tuning. Distinct from
         // the right activity bar's bookmark icon (which shows the
         // list): this is the *action*, so the glyph is
-        // "bookmark.fill" and the tooltip names it. Flips the
-        // shared `showingAddBookmark` flag the sheet binds to.
+        // "bookmark.fill" and the tooltip names it. Opens the
+        // editor sheet in add mode via `model.bookmarkEditor`.
         // `Label` (not a bare `Image`) for the same toolbar
         // display-mode robustness the RadioReference button
         // relies on below.
         ToolbarItem(placement: .automatic) {
             Button {
-                model.showingAddBookmark = true
+                model.bookmarkEditor = .add
             } label: {
                 Label("Add Bookmark", systemImage: "bookmark.fill")
             }

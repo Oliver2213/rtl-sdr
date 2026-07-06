@@ -41,7 +41,7 @@ struct SDRCommands: Commands {
         CommandMenu("Bookmarks") {
             // Ellipsis: the command opens the Add Bookmark sheet
             // to collect a name/category before it executes.
-            Button("Add Bookmark…") { core.showingAddBookmark = true }
+            Button("Add Bookmark…") { core.bookmarkEditor = .add }
                 .keyboardShortcut("d", modifiers: .command)
             Divider()
             // Reveal the Bookmarks panel (right activity bar
