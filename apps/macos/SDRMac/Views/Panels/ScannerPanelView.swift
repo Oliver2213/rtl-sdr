@@ -1,13 +1,14 @@
 //
 // ScannerPanelView.swift — Scanner activity panel (closes #447).
 //
-// Three flat Sections matching the GTK
-// `crates/sdr-ui/src/sidebar/scanner_panel.rs` layout:
+// Flat Sections in a grouped Form:
 //
-//   - Scanner   — master enable toggle
-//   - Active    — Channel / State rows + lockout button (button
-//                 only visible when latched)
-//   - Timing    — default dwell + default hang
+//   - Scanner      — master enable toggle
+//   - Scan sources — which channels to sweep (bookmarks + the
+//                    named channel catalogs)
+//   - Active       — Channel / State rows + lockout button
+//                    (button only visible when latched)
+//   - Timing       — default dwell + default hang
 //
 // The Channel / State row text wraps multi-line by default —
 // SwiftUI `Text` doesn't truncate without an explicit
@@ -15,12 +16,10 @@
 // bookmark names like "KY State Police District 7 Dispatch"
 // stay fully readable in the sidebar.
 //
-// Bookmark → `ScannerChannel` projection isn't wired yet — the
-// Mac `Bookmark` model doesn't carry `scan_enabled` /
-// `priority` fields the Linux side has. Until #490 lands that,
-// flipping the master switch leaves the engine in `.idle` (no
-// rotation to drive); the Scanner section's footer documents
-// the gap so the panel reads honestly during the carve-out.
+// The scan set is projected in `CoreModel.refreshScannerChannels`:
+// scan-enabled bookmarks (per-bookmark opt-in, #490) plus every
+// channel of each opted-in catalog, union'd and pushed to the
+// engine scanner over the existing FFI.
 
 import SwiftUI
 import SdrCoreKit
@@ -29,6 +28,7 @@ struct ScannerPanelView: View {
     var body: some View {
         Form {
             ScannerMasterSection()
+            ScanSourcesSection()
             ActiveChannelSection()
             TimingSection()
         }
@@ -52,13 +52,44 @@ private struct ScannerMasterSection: View {
         } header: {
             Text("Scanner")
         } footer: {
-            // Honest footer: the master switch is wired, but
-            // there are no scan-enabled bookmarks to rotate
-            // through until per-bookmark scan opt-in lands
-            // (#490). The toggle still flips engine state
-            // (visible via the Active section's State row); it
-            // just stays in Off until #490 ships.
-            Text("Sweep through bookmarked frequencies. Per-bookmark scan opt-in lands in a follow-up — until then the rotation list is empty and the scanner stays Off.")
+            Text("Sweep the selected sources, lingering on any channel with activity. Configure squelch on the Radio panel — the scanner treats an open squelch as activity.")
+                .font(.caption)
+        }
+    }
+}
+
+// ============================================================
+//  Scan sources — bookmarks + channel catalogs
+// ============================================================
+
+/// Which channels the scanner sweeps. A flat checklist: the
+/// bookmark set plus one row per named channel catalog. Enabled
+/// rows union into the rotation (`CoreModel.refreshScannerChannels`)
+/// and re-push live via each setter, so toggling a source while
+/// scanning updates the rotation without a restart.
+private struct ScanSourcesSection: View {
+    @Environment(CoreModel.self) private var model
+
+    var body: some View {
+        Section {
+            Toggle("Bookmarks", isOn: Binding(
+                get: { model.scanIncludeBookmarks },
+                set: { model.setScanIncludeBookmarks($0) }
+            ))
+            ForEach(channelCatalogs) { catalog in
+                Toggle(catalog.name, isOn: Binding(
+                    get: { model.scanEnabledCatalogIDs.contains(catalog.id) },
+                    set: { model.setScanCatalogEnabled(id: catalog.id, enabled: $0) }
+                ))
+            }
+        } header: {
+            Text("Scan sources")
+        } footer: {
+            // "Bookmarks" scans the ones opted in via the
+            // Bookmarks panel's scan toggle. Leaving always-on
+            // broadcasters like NOAA Weather off keeps the sweep
+            // from holding on a channel that never goes quiet.
+            Text("Channels to sweep. \"Bookmarks\" covers bookmarks with scanning enabled. Leave always-on broadcasters like NOAA Weather off so the scan doesn't stay parked on them.")
                 .font(.caption)
         }
     }

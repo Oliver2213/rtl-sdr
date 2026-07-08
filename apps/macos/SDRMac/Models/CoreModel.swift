@@ -320,6 +320,20 @@ final class CoreModel {
     /// fallback contract as `scannerDefaultDwellMs`.
     var scannerDefaultHangMs: Int = 2_000
 
+    /// Whether scan-enabled bookmarks are included in the scanner
+    /// rotation. Defaults `true` — the pre-existing behavior where
+    /// bookmarks were the scanner's only source. Persisted
+    /// Mac-only via `UserDefaults`.
+    var scanIncludeBookmarks: Bool = true
+
+    /// Channel-catalog ids (`ChannelCatalog.id`, i.e. the catalog
+    /// name) included in the scanner rotation. Empty by default so
+    /// nothing changes until the user opts a catalog in. Union'd
+    /// with the bookmark source in `refreshScannerChannels`.
+    /// Persisted Mac-only via `UserDefaults` (no Linux equivalent —
+    /// the channel catalogs are a macOS-only surface).
+    var scanEnabledCatalogIDs: Set<String> = []
+
     // ==========================================================
     //  Audio
     // ==========================================================
@@ -964,6 +978,22 @@ final class CoreModel {
             if Self.scannerHangMsRange.contains(stored) {
                 scannerDefaultHangMs = stored
             }
+        }
+
+        // Restore scan-source selection (Mac-only). Absent key
+        // keeps the defaults (bookmarks on, no catalogs). Stale
+        // catalog ids — e.g. after a catalog rename — are dropped
+        // by intersecting with the current catalog list.
+        if UserDefaults.standard.object(forKey: Self.scanIncludeBookmarksDefaultsKey) != nil {
+            scanIncludeBookmarks = UserDefaults.standard.bool(
+                forKey: Self.scanIncludeBookmarksDefaultsKey
+            )
+        }
+        if let stored = UserDefaults.standard.stringArray(
+            forKey: Self.scanEnabledCatalogsDefaultsKey
+        ) {
+            let known = Set(channelCatalogs.map(\.id))
+            scanEnabledCatalogIDs = Set(stored).intersection(known)
         }
 
         // Seed the RadioReference credentials flag from the
@@ -1949,40 +1979,68 @@ final class CoreModel {
     /// scanner without forcing the user to fully populate
     /// every field. Per #490.
     func refreshScannerChannels() {
-        guard let core, let provider = bookmarksProvider else { return }
-        let bookmarks = provider()
+        guard let core else { return }
         let dwell = UInt32(scannerDefaultDwellMs)
         let hang = UInt32(scannerDefaultHangMs)
-        let channels: [SdrCore.ScannerChannel] = bookmarks.compactMap { b in
-            // Hard guards on every numeric field — `bookmarks.json`
-            // is user-editable and a hand-edited file with a
-            // negative / NaN / out-of-range frequency would
-            // otherwise trap on `UInt64(freq.rounded())`.
-            // `UInt64(exactly:)` returns nil for any value
-            // outside the type's range without trapping; the
-            // bandwidth guard rejects 0 / negative / NaN /
-            // infinity which the FFI would refuse anyway. Per
-            // `CodeRabbit` round 1 on PR #615.
-            guard b.scanEnabled == true,
-                  let freq = b.centerFrequencyHz,
-                  freq.isFinite,
-                  freq >= 0,
-                  let freqHz = UInt64(exactly: freq.rounded())
-            else {
-                return nil
+        var channels: [SdrCore.ScannerChannel] = []
+
+        // Source 1 — scan-enabled bookmarks (when included).
+        if scanIncludeBookmarks, let provider = bookmarksProvider {
+            channels += provider().compactMap { b in
+                // Hard guards on every numeric field —
+                // `bookmarks.json` is user-editable and a
+                // hand-edited file with a negative / NaN /
+                // out-of-range frequency would otherwise trap on
+                // `UInt64(freq.rounded())`. `UInt64(exactly:)`
+                // returns nil for any value outside the type's
+                // range without trapping; the bandwidth guard
+                // rejects 0 / negative / NaN / infinity which the
+                // FFI would refuse anyway. Per `CodeRabbit` round
+                // 1 on PR #615.
+                guard b.scanEnabled == true,
+                      let freq = b.centerFrequencyHz,
+                      freq.isFinite,
+                      freq >= 0,
+                      let freqHz = UInt64(exactly: freq.rounded())
+                else {
+                    return nil
+                }
+                let bandwidth = b.bandwidthHz ?? 12_500.0
+                guard bandwidth.isFinite, bandwidth > 0 else { return nil }
+                return SdrCore.ScannerChannel(
+                    name: b.name,
+                    frequencyHz: freqHz,
+                    demodMode: b.demodMode ?? .nfm,
+                    bandwidthHz: bandwidth,
+                    priority: b.priority ?? 0,
+                    dwellMs: dwell,
+                    hangMs: hang
+                )
             }
-            let bandwidth = b.bandwidthHz ?? 12_500.0
-            guard bandwidth.isFinite, bandwidth > 0 else { return nil }
-            return SdrCore.ScannerChannel(
-                name: b.name,
-                frequencyHz: freqHz,
-                demodMode: b.demodMode ?? .nfm,
-                bandwidthHz: bandwidth,
-                priority: b.priority ?? 0,
-                dwellMs: dwell,
-                hangMs: hang
-            )
         }
+
+        // Source 2 — every channel of each opted-in catalog.
+        // Catalog frequencies are compile-time constants, so the
+        // only guard needed is the exact `UInt64` cast. The
+        // channel name is catalog-qualified ("Marine VHF Ch 16")
+        // so the Active row and lockout key stay unambiguous.
+        for catalog in channelCatalogs
+        where scanEnabledCatalogIDs.contains(catalog.id) {
+            channels += catalog.channels.compactMap { ch in
+                guard let freqHz = UInt64(exactly: ch.centerFrequencyHz.rounded())
+                else { return nil }
+                return SdrCore.ScannerChannel(
+                    name: "\(catalog.name) \(ch.name)",
+                    frequencyHz: freqHz,
+                    demodMode: ch.demodMode,
+                    bandwidthHz: ch.bandwidthHz,
+                    priority: 0,
+                    dwellMs: dwell,
+                    hangMs: hang
+                )
+            }
+        }
+
         capture { try core.setScannerChannels(channels) }
     }
 
@@ -2057,6 +2115,36 @@ final class CoreModel {
     /// `UserDefaults` key for the scanner default-hang (ms).
     /// Same name-parity rationale as the dwell key.
     static let scannerDefaultHangMsDefaultsKey = "scanner_default_hang_ms"
+
+    /// Include/exclude the bookmark source in the scan set, then
+    /// re-push so a running scan updates live.
+    func setScanIncludeBookmarks(_ include: Bool) {
+        scanIncludeBookmarks = include
+        UserDefaults.standard.set(include, forKey: Self.scanIncludeBookmarksDefaultsKey)
+        refreshScannerChannels()
+    }
+
+    /// Opt a channel catalog into / out of the scan set, then
+    /// re-push so a running scan updates live.
+    func setScanCatalogEnabled(id: String, enabled: Bool) {
+        if enabled {
+            scanEnabledCatalogIDs.insert(id)
+        } else {
+            scanEnabledCatalogIDs.remove(id)
+        }
+        UserDefaults.standard.set(
+            Array(scanEnabledCatalogIDs),
+            forKey: Self.scanEnabledCatalogsDefaultsKey
+        )
+        refreshScannerChannels()
+    }
+
+    /// `UserDefaults` keys for the scan-source selection. Mac-only
+    /// (no Linux equivalent — the channel catalogs are a macOS
+    /// surface), so these use the `SDRMac.`-prefixed convention
+    /// rather than a shared-config key name.
+    static let scanIncludeBookmarksDefaultsKey = "SDRMac.scanIncludeBookmarks"
+    static let scanEnabledCatalogsDefaultsKey = "SDRMac.scanEnabledCatalogs"
 
     // ----------------------------------------------------------
     //  Source (advanced) — #246
